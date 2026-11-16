@@ -19,7 +19,7 @@ instance Prism  ──►  horizon-prepare  ──►  horizon-client
 | Jalon | Contenu | État |
 |---|---|---|
 | M0 | spike hors fork, flux complet, vrais binaires | ✅ validé |
-| M1 | squelette du fork : type d'instance `Horizon` | ✅ écrit, non compilé |
+| M1 | squelette du fork : type d'instance `Horizon` | ✅ compilé et testé |
 | M2 | page de réglages Horizon (canal, version, options) | à faire |
 | M3 | étape de lancement `HorizonLaunchStep` + sidecar | à faire |
 | M4 | préparation/repair dans l'UI, progression | à faire |
@@ -204,12 +204,17 @@ Le plan du fork (M1–M6), l'architecture retenue et la carte des fichiers Prism
 
 Le squelette du fork vit dans [`fork/`](fork/) :
 
-- [`fork/M1.md`](fork/M1.md) : changements, création manuelle d'une instance
-  de test, prérequis et procédure de compilation ;
+- [`fork/M1.md`](fork/M1.md) : changements, création d'une instance de test,
+  outillage sans administrateur, problème AGL du SDK macOS 26 et résultat des
+  tests ;
 - [`fork/patches/0001-feat-add-Horizon-instance-type-skeleton.patch`](fork/patches/)
   : le commit à appliquer sur `PrismLauncher/develop` ;
-- [`fork/build-m1.sh`](fork/build-m1.sh) et
-  [`fork/make-test-instance.sh`](fork/make-test-instance.sh).
+- [`fork/build-m1.sh`](fork/build-m1.sh) : configure + compile (Qt via `aqt`,
+  dépendances via vcpkg) ;
+- [`fork/make-test-instance.sh`](fork/make-test-instance.sh) : instance
+  `HorizonTest` jetable ;
+- un stub `AGL.framework` vide, généré par `build-m1.sh` dans `fork/stubs/`
+  (non versionné), pour contourner la disparition d'AGL dans le SDK macOS 26.
 
 Le clone complet de Prism (`fork/PrismLauncher/`) n'est **pas** versionné ici :
 il a son propre dépôt et sera publié comme fork GitHub séparé.

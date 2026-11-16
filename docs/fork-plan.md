@@ -80,7 +80,7 @@ chargement.
 
 ## 2. Jalons
 
-### M1 — squelette du fork ✅ (écrit, non compilé)
+### M1 — squelette du fork ✅ (compilé et testé)
 
 Objectif : une instance `Horizon` apparaît, s'ouvre, et « Play » échoue
 proprement avec un message explicite.

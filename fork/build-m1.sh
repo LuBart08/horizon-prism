@@ -28,9 +28,33 @@ command -v cmake >/dev/null || { echo "error: cmake not found" >&2; exit 1; }
 command -v ninja >/dev/null || { echo "error: ninja not found" >&2; exit 1; }
 command -v pkg-config >/dev/null || { echo "error: pkg-config not found" >&2; exit 1; }
 
+# macOS 26 SDK removed AGL.framework, but Qt 6.8 still links `-framework AGL`.
+# Prism uses no AGL symbol, so an empty static framework is enough to link.
+STUBS="$ROOT/stubs"
+AGL="$STUBS/AGL.framework"
+if [ ! -e "$AGL/Versions/A/AGL" ]; then
+    mkdir -p "$AGL/Versions/A" "$AGL/Resources"
+    printf 'static const int horizon_agl_stub = 0;\n' > "$STUBS/agl_stub.c"
+    clang -c -o "$STUBS/agl_stub.o" "$STUBS/agl_stub.c"
+    ar rcs "$AGL/Versions/A/AGL" "$STUBS/agl_stub.o"
+    ln -sfn A "$AGL/Versions/Current"
+    ln -sfn Versions/Current/AGL "$AGL/AGL"
+    cat > "$AGL/Resources/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>org.horizon-prism.agl-stub</string>
+  <key>CFBundleName</key><string>AGL</string>
+  <key>CFBundlePackageType</key><string>FMWK</string>
+</dict></plist>
+PLIST
+fi
+
 cmake -S "$PRISM" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE=Debug \
     -DCMAKE_PREFIX_PATH="$QT_DIR" \
+    -DCMAKE_LIBRARY_PATH="$ROOT/stubs" \
+    -U WrapOpenGL_AGL \
     -DCMAKE_TOOLCHAIN_FILE="$PRISM/cmake/vcpkg/scripts/buildsystems/vcpkg.cmake" \
     -DVCPKG_TARGET_TRIPLET=x64-osx \
     -DENABLE_LTO=OFF \
@@ -39,4 +63,4 @@ cmake -S "$PRISM" -B "$BUILD_DIR" -G Ninja \
 cmake --build "$BUILD_DIR" --target PrismLauncher -j "$(sysctl -n hw.ncpu)"
 
 echo
-echo "Built: $BUILD_DIR/PrismLauncher.app"
+echo "Built: $BUILD_DIR/prismlauncher.app"
