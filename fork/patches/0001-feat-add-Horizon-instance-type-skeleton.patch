@@ -1,0 +1,512 @@
+From 61af3a49e1519947f112891e2fec08d26c07e481 Mon Sep 17 00:00:00 2001
+From: horizon-prism <horizon-prism@localhost>
+Date: Mon, 16 Nov 2026 10:44:37 +0100
+Subject: [PATCH] feat: add Horizon instance type skeleton (M1)
+
+Register InstanceType=Horizon and load it as HorizonInstance, a
+MinecraftInstance subclass that keeps the Prism game dir, saves, screenshots
+and Microsoft account, but drops the Java assumptions:
+
+- horizon.json is the source of truth for the Horizon side (channel,
+  client/preparer versions, launch_api/output_version/native_hooks pins);
+- MinecraftInstance::loadSpecificSettings() rewrites InstanceType to
+  OneSix, so HorizonInstance restores Horizon after the base call;
+- no update task, no PackProfile traits, Horizon folders for resources,
+  home and preparer root;
+- launching ends in HorizonNotPrepared with a clear message instead of
+  running the Java launch steps (real launching is M3, preparation M4).
+
+Not compiled yet: this machine has no Qt 6, CMake or Ninja.
+See fork/M1.md for the manual test procedure.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ launcher/CMakeLists.txt                       |   4 +
+ launcher/InstanceList.cpp                     |  10 +-
+ launcher/minecraft/HorizonInstance.cpp        | 251 ++++++++++++++++++
+ launcher/minecraft/HorizonInstance.h          |  85 ++++++
+ .../minecraft/launch/HorizonNotPrepared.cpp   |  29 ++
+ .../minecraft/launch/HorizonNotPrepared.h     |  31 +++
+ 6 files changed, 408 insertions(+), 2 deletions(-)
+ create mode 100644 launcher/minecraft/HorizonInstance.cpp
+ create mode 100644 launcher/minecraft/HorizonInstance.h
+ create mode 100644 launcher/minecraft/launch/HorizonNotPrepared.cpp
+ create mode 100644 launcher/minecraft/launch/HorizonNotPrepared.h
+
+diff --git a/launcher/CMakeLists.txt b/launcher/CMakeLists.txt
+index 6f7d844..20a112b 100644
+--- a/launcher/CMakeLists.txt
++++ b/launcher/CMakeLists.txt
+@@ -245,6 +245,8 @@ set(MINECRAFT_SOURCES
+     minecraft/launch/ClaimAccount.h
+     minecraft/launch/CreateGameFolders.cpp
+     minecraft/launch/CreateGameFolders.h
++    minecraft/launch/HorizonNotPrepared.cpp
++    minecraft/launch/HorizonNotPrepared.h
+     minecraft/launch/EnsureAvailableMemory.cpp
+     minecraft/launch/EnsureAvailableMemory.h
+     minecraft/launch/EnsureOfflineLibraries.cpp
+@@ -271,6 +273,8 @@ set(MINECRAFT_SOURCES
+     minecraft/GradleSpecifier.h
+     minecraft/MinecraftInstance.cpp
+     minecraft/MinecraftInstance.h
++    minecraft/HorizonInstance.cpp
++    minecraft/HorizonInstance.h
+     minecraft/LaunchProfile.cpp
+     minecraft/LaunchProfile.h
+     minecraft/Component.cpp
+diff --git a/launcher/InstanceList.cpp b/launcher/InstanceList.cpp
+index 7265282..77157e9 100644
+--- a/launcher/InstanceList.cpp
++++ b/launcher/InstanceList.cpp
+@@ -58,6 +58,7 @@
+ 
+ #include "InstanceTask.h"
+ #include "WatchLock.h"
++#include "minecraft/HorizonInstance.h"
+ #include "minecraft/MinecraftInstance.h"
+ #include "settings/INISettingsObject.h"
+ 
+@@ -719,12 +720,17 @@ std::unique_ptr<MinecraftInstance> InstanceList::loadInstance(const InstanceId&
+     instanceSettings->registerSetting("InstanceType", "");
+ 
+     const QString instType = instanceSettings->get("InstanceType").toString();
+-    if (!instType.isEmpty() && instType != "OneSix") {
++    if (!instType.isEmpty() && instType != "OneSix" && instType != "Horizon") {
+         qDebug() << "Instance " << id << "has invalid type" << instType;
+         return nullptr;
+     }
+ 
+-    auto inst = std::make_unique<MinecraftInstance>(m_globalSettings, std::move(instanceSettings), instanceRoot);
++    std::unique_ptr<MinecraftInstance> inst;
++    if (instType == "Horizon") {
++        inst = std::make_unique<HorizonInstance>(m_globalSettings, std::move(instanceSettings), instanceRoot);
++    } else {
++        inst = std::make_unique<MinecraftInstance>(m_globalSettings, std::move(instanceSettings), instanceRoot);
++    }
+     qDebug() << "Loaded instance" << inst->name() << "from" << inst->instanceRoot();
+ 
+     auto shortcut = inst->shortcuts();
+diff --git a/launcher/minecraft/HorizonInstance.cpp b/launcher/minecraft/HorizonInstance.cpp
+new file mode 100644
+index 0000000..98b9de0
+--- /dev/null
++++ b/launcher/minecraft/HorizonInstance.cpp
+@@ -0,0 +1,251 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#include "HorizonInstance.h"
++
++#include <QDebug>
++#include <QFileInfo>
++#include <QJsonDocument>
++#include <QJsonParseError>
++
++#include "FileSystem.h"
++#include "launch/LaunchTask.h"
++#include "minecraft/launch/HorizonNotPrepared.h"
++
++namespace {
++constexpr auto HORIZON_MINECRAFT_VERSION = "26.3";
++constexpr auto HORIZON_DEFAULT_CHANNEL = "stable";
++constexpr auto HORIZON_DEFAULT_LAUNCH_API = "0.1.0";
++constexpr int HORIZON_DEFAULT_OUTPUT_VERSION = 4;
++constexpr int HORIZON_DEFAULT_NATIVE_HOOKS = 415;
++}  // namespace
++
++HorizonInstance::HorizonInstance(SettingsObject* globalSettings,
++                                 std::unique_ptr<SettingsObject> settings,
++                                 const QString& rootDir)
++    : MinecraftInstance(globalSettings, std::move(settings), rootDir)
++{
++    // horizon.json is independent from instance.cfg, so it can be read before
++    // the instance-specific settings are loaded.
++    loadHorizonJson();
++}
++
++HorizonInstance::~HorizonInstance() = default;
++
++QString HorizonInstance::horizonJsonPath() const
++{
++    return FS::PathCombine(instanceRoot(), "horizon.json");
++}
++
++void HorizonInstance::loadHorizonJson()
++{
++    auto result = FS::read(horizonJsonPath());
++    if (!result) {
++        // A brand new instance has no horizon.json yet: defaults are used and
++        // the file is written on the next save.
++        m_horizon = QJsonObject();
++        return;
++    }
++
++    QJsonParseError error{};
++    const auto document = QJsonDocument::fromJson(result.value(), &error);
++    if (error.error != QJsonParseError::NoError || !document.isObject()) {
++        qWarning() << "horizon.json is not a JSON object:" << error.errorString();
++        m_horizon = QJsonObject();
++        return;
++    }
++    m_horizon = document.object();
++}
++
++void HorizonInstance::saveHorizonJson()
++{
++    if (!m_horizon.contains("formatVersion"))
++        m_horizon["formatVersion"] = 1;
++    if (!m_horizon.contains("channel"))
++        m_horizon["channel"] = QString(HORIZON_DEFAULT_CHANNEL);
++    if (!m_horizon.contains("minecraft"))
++        m_horizon["minecraft"] = QString(HORIZON_MINECRAFT_VERSION);
++
++    const auto data = QJsonDocument(m_horizon).toJson(QJsonDocument::Indented);
++    if (auto result = FS::write(horizonJsonPath(), data); !result) {
++        qWarning() << "Cannot write" << horizonJsonPath() << ":" << result.error();
++    }
++}
++
++void HorizonInstance::loadSpecificSettings()
++{
++    if (isSpecificSettingsLoaded())
++        return;
++
++    MinecraftInstance::loadSpecificSettings();
++
++    // MinecraftInstance::loadSpecificSettings() rewrites InstanceType to
++    // "OneSix". Keep our own type so the instance survives a restart.
++    if (m_settings->get("InstanceType").toString() != "Horizon")
++        m_settings->set("InstanceType", "Horizon");
++
++    loadHorizonJson();
++}
++
++void HorizonInstance::saveNow()
++{
++    MinecraftInstance::saveNow();
++    saveHorizonJson();
++}
++
++QSet<QString> HorizonInstance::traits() const
++{
++    // No PackProfile: there is no Java version to inspect.
++    return { "Horizon" };
++}
++
++QList<Task::Ptr> HorizonInstance::createUpdateTask()
++{
++    // Nothing to download or update on the Java side. M4 prepares resources
++    // through the Horizon sidecar instead.
++    return {};
++}
++
++LaunchTask* HorizonInstance::createLaunchTask(AuthSessionPtr account, MinecraftTarget::Ptr targetToJoin)
++{
++    Q_UNUSED(account);
++    Q_UNUSED(targetToJoin);
++
++    auto process = LaunchTask::create(this);
++    auto* task = process.get();
++    task->appendStep(makeShared<HorizonNotPrepared>(task));
++    return process.release();
++}
++
++QString HorizonInstance::channel() const
++{
++    return m_horizon.value("channel").toString(HORIZON_DEFAULT_CHANNEL);
++}
++
++QString HorizonInstance::clientVersion() const
++{
++    return m_horizon.value("clientVersion").toString();
++}
++
++QString HorizonInstance::preparerVersion() const
++{
++    return m_horizon.value("preparerVersion").toString();
++}
++
++QString HorizonInstance::horizonMinecraftVersion() const
++{
++    return m_horizon.value("minecraft").toString(HORIZON_MINECRAFT_VERSION);
++}
++
++QString HorizonInstance::launchApiPin() const
++{
++    return m_horizon.value("pins").toObject().value("launch_api").toString(HORIZON_DEFAULT_LAUNCH_API);
++}
++
++int HorizonInstance::outputVersionPin() const
++{
++    return m_horizon.value("pins").toObject().value("output_version").toInt(HORIZON_DEFAULT_OUTPUT_VERSION);
++}
++
++int HorizonInstance::nativeHooksPin() const
++{
++    return m_horizon.value("pins").toObject().value("native_hooks_api").toInt(HORIZON_DEFAULT_NATIVE_HOOKS);
++}
++
++void HorizonInstance::setChannel(const QString& channel)
++{
++    m_horizon["channel"] = channel;
++    saveHorizonJson();
++    emit propertiesChanged();
++}
++
++void HorizonInstance::setClientVersion(const QString& version)
++{
++    m_horizon["clientVersion"] = version;
++    saveHorizonJson();
++    emit propertiesChanged();
++}
++
++void HorizonInstance::setPreparerVersion(const QString& version)
++{
++    m_horizon["preparerVersion"] = version;
++    saveHorizonJson();
++    emit propertiesChanged();
++}
++
++QString HorizonInstance::resourcesDir() const
++{
++    return FS::PathCombine(instanceRoot(), "horizon", "resources");
++}
++
++QString HorizonInstance::horizonHomeDir() const
++{
++    return FS::PathCombine(instanceRoot(), "horizon", "home");
++}
++
++QString HorizonInstance::horizonRootDir() const
++{
++    return FS::PathCombine(instanceRoot(), "horizon", "root");
++}
++
++bool HorizonInstance::isPrepared() const
++{
++    // Cheap check for M1. M4 asks `horizon-tools check`, which also compares
++    // the preparer's output_version.
++    return QFileInfo(FS::PathCombine(resourcesDir(), "assets")).isDir();
++}
++
++QString HorizonInstance::instanceConfigFolder() const
++{
++    return FS::PathCombine(instanceRoot(), "horizon", "config");
++}
++
++QStringList HorizonInstance::getLogFileSearchPaths()
++{
++    return { FS::PathCombine(horizonHomeDir(), "logs"), horizonHomeDir(), gameRoot() };
++}
++
++QString HorizonInstance::getStatusbarDescription()
++{
++    QStringList parts{ "Horizon" };
++    if (!clientVersion().isEmpty())
++        parts << clientVersion();
++    parts << QString("(%1)").arg(channel());
++    if (!isPrepared())
++        parts << tr("not prepared");
++    return parts.join(' ');
++}
++
++QStringList HorizonInstance::verboseDescription(AuthSessionPtr session, MinecraftTarget::Ptr targetToJoin)
++{
++    Q_UNUSED(session);
++    Q_UNUSED(targetToJoin);
++
++    QStringList out;
++    out << tr("Horizon instance: %1").arg(name());
++    out << tr("Minecraft %1, channel %2").arg(horizonMinecraftVersion(), channel());
++    out << tr("Client: %1").arg(clientVersion().isEmpty() ? tr("not installed") : clientVersion());
++    out << tr("Preparer: %1").arg(preparerVersion().isEmpty() ? tr("not installed") : preparerVersion());
++    out << tr("Launch API %1, output version %2, native hooks %3")
++               .arg(launchApiPin())
++               .arg(outputVersionPin())
++               .arg(nativeHooksPin());
++    out << tr("Resources: %1 (%2)").arg(resourcesDir(), isPrepared() ? tr("prepared") : tr("not prepared"));
++    out << tr("Game folder: %1").arg(gameRoot());
++    return out;
++}
+diff --git a/launcher/minecraft/HorizonInstance.h b/launcher/minecraft/HorizonInstance.h
+new file mode 100644
+index 0000000..2aee364
+--- /dev/null
++++ b/launcher/minecraft/HorizonInstance.h
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include <QJsonObject>
++
++#include "minecraft/MinecraftInstance.h"
++
++/*!
++ * An instance that runs Project Horizon (Minecraft Java 26.3 rewritten in Rust)
++ * instead of the Java client.
++ *
++ * Milestone M1: the instance loads, saves its own `horizon.json` model, and
++ * refuses to launch with a clear message. Launching arrives in M3, preparation
++ * in M4.
++ *
++ * `horizon.json` is the source of truth for the Horizon side; `instance.cfg`
++ * keeps the Prism-wide settings (name, icon, play time) and `InstanceType=Horizon`.
++ */
++class HorizonInstance : public MinecraftInstance {
++    Q_OBJECT
++
++   public:
++    HorizonInstance(SettingsObject* globalSettings, std::unique_ptr<SettingsObject> settings, const QString& rootDir);
++    ~HorizonInstance() override;
++
++    void saveNow() override;
++    void loadSpecificSettings() override;
++    QSet<QString> traits() const override;
++    QList<Task::Ptr> createUpdateTask() override;
++    LaunchTask* createLaunchTask(AuthSessionPtr account, MinecraftTarget::Ptr targetToJoin) override;
++    QString getStatusbarDescription() override;
++    QString instanceConfigFolder() const override;
++    QStringList getLogFileSearchPaths() override;
++    QStringList verboseDescription(AuthSessionPtr session, MinecraftTarget::Ptr targetToJoin) override;
++    bool canExport() const override { return false; }
++
++    ////// Horizon model (horizon.json) //////
++    QString horizonJsonPath() const;
++
++    QString channel() const;
++    QString clientVersion() const;
++    QString preparerVersion() const;
++    QString horizonMinecraftVersion() const;
++    QString launchApiPin() const;
++    int outputVersionPin() const;
++    int nativeHooksPin() const;
++
++    void setChannel(const QString& channel);
++    void setClientVersion(const QString& version);
++    void setPreparerVersion(const QString& version);
++
++    ////// Horizon folders //////
++    /// Prepared resources, passed to `horizon-client --resources`.
++    QString resourcesDir() const;
++    /// Logs and crash reports, passed to `horizon-client --home`.
++    QString horizonHomeDir() const;
++    /// Scratch folder of the preparer (`--root`), holds research-lock.json in a release.
++    QString horizonRootDir() const;
++
++    /// True when the resources folder looks prepared (M4 will use `--check`).
++    bool isPrepared() const;
++
++   private:
++    void loadHorizonJson();
++    void saveHorizonJson();
++
++    QJsonObject m_horizon;
++};
+diff --git a/launcher/minecraft/launch/HorizonNotPrepared.cpp b/launcher/minecraft/launch/HorizonNotPrepared.cpp
+new file mode 100644
+index 0000000..e906848
+--- /dev/null
++++ b/launcher/minecraft/launch/HorizonNotPrepared.cpp
+@@ -0,0 +1,29 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#include "HorizonNotPrepared.h"
++
++#include "launch/LaunchTask.h"
++#include "minecraft/HorizonInstance.h"
++
++HorizonNotPrepared::HorizonNotPrepared(LaunchTask* parent) : LaunchStep(parent) {}
++
++void HorizonNotPrepared::executeTask()
++{
++    auto* horizon = qobject_cast<HorizonInstance*>(m_parent->instance());
++    if (horizon != nullptr && !horizon->isPrepared()) {
++        emit logLine(tr("Horizon resources are not prepared yet: %1").arg(horizon->resourcesDir()), MessageLevel::Error);
++        emitFailed(tr("This Horizon instance has no prepared resources yet. Automatic preparation arrives in milestone M4."));
++        return;
++    }
++
++    emit logLine(tr("Horizon launching is not wired into the launcher yet (milestone M3)."), MessageLevel::Error);
++    emitFailed(tr("This Horizon instance cannot be launched yet: launching arrives in milestone M3."));
++}
+diff --git a/launcher/minecraft/launch/HorizonNotPrepared.h b/launcher/minecraft/launch/HorizonNotPrepared.h
+new file mode 100644
+index 0000000..5c71dd7
+--- /dev/null
++++ b/launcher/minecraft/launch/HorizonNotPrepared.h
+@@ -0,0 +1,31 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#pragma once
++
++#include <launch/LaunchStep.h>
++
++/*!
++ * Milestone M1 placeholder: launching a Horizon instance must fail clearly
++ * instead of running Minecraft's Java launch steps.
++ *
++ * M3 replaces this with the real step that spawns `horizon-client` with the
++ * account session on stdin.
++ */
++class HorizonNotPrepared : public LaunchStep {
++    Q_OBJECT
++
++   public:
++    explicit HorizonNotPrepared(LaunchTask* parent);
++    ~HorizonNotPrepared() override = default;
++
++    void executeTask() override;
++    bool canAbort() const override { return false; }
++};
+-- 
+2.50.1 (Apple Git-155)
+

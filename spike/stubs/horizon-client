@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Stub horizon-client for the M0 spike tests.
+
+  --launch-api   one JSON object, exit 0
+  normal launch  reads the session JSON on stdin, records the invocation when
+                 STUB_CLIENT_RECORD names a folder, prints a log line, and exits
+                 with STUB_CLIENT_EXIT (0 by default; 101 prints a crash report
+                 line so the spike's crash mapping can be tested).
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+OPTIONS = [
+    {"name": "--resources", "value": "DIR"},
+    {"name": "--game-dir", "value": "DIR"},
+    {"name": "--home", "value": "DIR"},
+    {"name": "--player-dir", "value": "DIR"},
+    {"name": "--width", "value": "N"},
+    {"name": "--height", "value": "N"},
+    {"name": "--fullscreen", "value": None},
+    {"name": "--session-file", "value": "PATH"},
+    {"name": "--session-stdin", "value": None},
+    {"name": "--quickPlaySingleplayer", "value": "WORLD"},
+    {"name": "--quickPlayMultiplayer", "value": "HOST:PORT"},
+    {"name": "--launch-api", "value": None},
+]
+
+
+def value(argv, name, default=None):
+    try:
+        return argv[argv.index(name) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def main(argv):
+    if "--launch-api" in argv:
+        print(
+            json.dumps(
+                {
+                    "launch_api": "0.1.0",
+                    "horizon": "stub-client-0.1.0",
+                    "minecraft": "26.3",
+                    "crash_report_line": "Horizon: crash report saved to ",
+                    "options": OPTIONS,
+                    "content": {"mod": {"api": ["0.2"]}},
+                    "exit_codes": [0, 1, 2, 101],
+                }
+            )
+        )
+        return 0
+
+    raw = sys.stdin.read() if "--session-stdin" in argv else ""
+    try:
+        session = json.loads(raw) if raw.strip() else {}
+    except ValueError as exc:
+        print("Horizon: not signed in: %s" % exc, file=sys.stderr)
+        return 1
+
+    record = os.environ.get("STUB_CLIENT_RECORD")
+    if record:
+        folder = Path(record)
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "launch.json").write_text(
+            json.dumps(
+                {
+                    "argv": argv,
+                    "session": {
+                        "name": session.get("name"),
+                        "uuid": session.get("uuid"),
+                        "user_type": session.get("user_type"),
+                        "has_token": bool(session.get("access_token")),
+                    },
+                },
+                indent=2,
+            )
+        )
+
+    home = value(argv, "--home")
+    if home:
+        Path(home).mkdir(parents=True, exist_ok=True)
+        Path(home, "latest.log").write_text("stub client started\n")
+
+    print("stub: hello %s" % session.get("name", "?"))
+    code = int(os.environ.get("STUB_CLIENT_EXIT", "0"))
+    if code in (1, 101):
+        crash = Path(record or home or ".").resolve() / "crash-report.txt"
+        crash.parent.mkdir(parents=True, exist_ok=True)
+        crash.write_text("stub crash\n")
+        print("Horizon: crash report saved to %s" % crash, file=sys.stderr)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

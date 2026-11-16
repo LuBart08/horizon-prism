@@ -1,0 +1,18 @@
+# Prism Launcher fork: its own git repository, cloned locally for development
+fork/PrismLauncher/
+
+# Build trees
+build/
+build-*/
+install/
+
+# Local test data and logs
+fork/testdata/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store

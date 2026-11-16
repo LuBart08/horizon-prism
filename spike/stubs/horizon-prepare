@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Stub horizon-prepare for the M0 spike tests.
+
+It implements the shape of Horizon's documented contract:
+  --launch-api            one JSON object, exit 0
+  --check --output DIR    exit 0 when DIR/.stub-prepared exists, else 1 with gaps
+  --prepare ...           writes the marker, prints --progress json lines, exit 0
+No Minecraft file is read; the arguments are recorded for assertions.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+OPTIONS = [
+    {"name": "--prepare", "value": None},
+    {"name": "--output", "value": "DIR"},
+    {"name": "--check", "value": None},
+    {"name": "--complete", "value": None},
+    {"name": "--progress", "value": "json"},
+    {"name": "--prism-dir", "value": "PATH"},
+    {"name": "--version-json", "value": "PATH"},
+    {"name": "--client-jar", "value": "PATH"},
+    {"name": "--libraries-dir", "value": "DIR"},
+    {"name": "--assets-dir", "value": "DIR"},
+    {"name": "--server-jar", "value": "PATH"},
+    {"name": "--java-home", "value": "PATH"},
+]
+
+
+def value(argv, name, default=None):
+    try:
+        return argv[argv.index(name) + 1]
+    except (ValueError, IndexError):
+        return default
+
+
+def main(argv):
+    if "--launch-api" in argv:
+        options = list(OPTIONS)
+        if os.environ.get("STUB_PREPARE_NO_PRISM_DIR"):
+            # Simulate an older build that only takes the four explicit paths.
+            options = [o for o in options if o["name"] != "--prism-dir"]
+        print(
+            json.dumps(
+                {
+                    "launch_api": "0.1.0",
+                    "horizon": "stub-prepare-0.1.0",
+                    "minecraft": "26.3",
+                    "java_major": 25,
+                    "options": options,
+                    "exit_codes": [0, 1, 2],
+                }
+            )
+        )
+        return 0
+
+    output = value(argv, "--output")
+    if not output:
+        print("stub: --output is required", file=sys.stderr)
+        return 2
+    output = Path(output)
+
+    if "--check" in argv:
+        if not (output / ".stub-prepared").is_file():
+            print("gap: resources missing in %s" % output)
+            print("run: --prepare --output %s" % output)
+            return 1
+        if os.environ.get("STUB_PREPARE_OPTIONAL_GAPS") and not (
+            output / ".stub-prepared-complete"
+        ).is_file():
+            print("the sounds missing: horizon-prepare sounds")
+            print("the built-in packs missing: horizon-prepare packs")
+            return 1
+        return 0
+
+    if "--prepare" in argv:
+        prism_dir = value(argv, "--prism-dir")
+        required = {
+            "--version-json": value(argv, "--version-json"),
+            "--client-jar": value(argv, "--client-jar"),
+            "--libraries-dir": value(argv, "--libraries-dir"),
+            "--assets-dir": value(argv, "--assets-dir"),
+            "--server-jar": value(argv, "--server-jar"),
+        }
+        if prism_dir:
+            if not Path(prism_dir).is_dir():
+                print(json.dumps({"error": "--prism-dir does not exist: %s" % prism_dir}))
+                return 1
+            # Prism mode reads everything itself; the explicit paths must be absent.
+            for name, path in required.items():
+                if path:
+                    print(json.dumps({"error": "%s must not be passed with --prism-dir" % name}))
+                    return 1
+        else:
+            for name, path in required.items():
+                if not path:
+                    print(json.dumps({"error": "%s is required" % name}))
+                    return 1
+                if name != "--server-jar" and not Path(path).exists():
+                    print(json.dumps({"error": "%s does not exist: %s" % (name, path)}))
+                    return 1
+        output.mkdir(parents=True, exist_ok=True)
+        (output / ".stub-prepared").write_text("ok\n")
+        if "--complete" in argv:
+            (output / ".stub-prepared-complete").write_text("ok\n")
+        (output / "prepared.json").write_text(
+            json.dumps(
+                {
+                    "argv": argv,
+                    "prism_dir": prism_dir,
+                    "version_json": required["--version-json"],
+                    "client_jar": required["--client-jar"],
+                    "libraries_dir": required["--libraries-dir"],
+                    "assets_dir": required["--assets-dir"],
+                    "server_jar": required["--server-jar"],
+                    "java_home": value(argv, "--java-home"),
+                    "complete": "--complete" in argv,
+                },
+                indent=2,
+            )
+        )
+        for fraction, message in (
+            (0.1, "reading Minecraft files"),
+            (0.5, "building resources"),
+            (1.0, "done"),
+        ):
+            print(json.dumps({"fraction": fraction, "message": message}))
+        return 0
+
+    print("stub: nothing to do", file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
