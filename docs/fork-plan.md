@@ -121,27 +121,42 @@ Objectif : choisir canal/version et quelques options sans éditer de JSON.
 Critère : les réglages persistent dans `horizon.json` et survivent à un
 redémarrage.
 
-### M3 — lancement
+### M3 — lancement ✅ (compilé et testé)
 
 Objectif : « Play » lance Horizon avec la session Prism.
 
-- `launcher/launch/launch/` → `HorizonLaunchStep.{h,cpp}` :
-  1. vérifier `horizon-tools check` (sinon proposer « Prepare ») ;
-  2. construire la session depuis `AuthSession` (`auth/AuthSession.h`) :
-     `name`, `uuid` sans tirets, `access_token`, `user_type=msa`, `xuid` ;
-  3. lancer `horizon-tools launch` avec `--resources`, `--game-dir`,
-     `--home`, `--player-dir` (compte), `--session-stdin`,
-     largeur/hauteur/fullscreen ;
-  4. écrire la session sur **stdin**, jamais dans `argv` ;
-  5. parser la sortie : progression, logs, et le marqueur exact annoncé par
-     `--launch-api` (`crash_report_line`), pas une constante recopiée.
-- `launcher/launch/LaunchTask.cpp` : enregistrer l'étape pour
-  `HorizonInstance` (au lieu des étapes Java).
-- `launcher/launch/steps/` : ne pas exécuter `ModScanTask`,
-  `JavaArgumentsTask`, `TexturesTask` (pas de JVM, pas de mods Java).
+Implémenté sur la branche `horizon/m3` :
+
+- `launcher/minecraft/launch/HorizonLaunchStep.{h,cpp}` :
+  1. vérifie que les ressources sont préparées (M4 fera `--check`) ;
+  2. construit la session depuis `AuthSession` : `name`, `uuid` sans tirets,
+     `access_token`, `user_type=msa` ;
+  3. lance directement `horizon-client` avec `--resources`, `--game-dir`,
+     `--home`, largeur/hauteur et quick-play ;
+  4. écrit la session sur **stdin** (`--session-stdin`), jamais dans `argv` ;
+  5. lit `--launch-api` pour vérifier le pin et récupérer
+     `crash_report_line` (pas de constante recopiée) ;
+  6. traduit les codes de sortie (0/1/2/101) et suit le processus pour
+     « Kill ».
+- `launcher/minecraft/HorizonInstance.cpp` : `createLaunchTask()` ajoute
+  `HorizonLaunchStep` après `HorizonNotPrepared`, qui ne échoue plus que si
+  les ressources manquent ; résolution de `horizon-client` (`clientPath`,
+  version épinglée, dernière version installée, `PATH`).
+
+Écarts assumés par rapport au plan initial :
+
+- appel direct de `horizon-client` au lieu de l'enveloppe `horizon-tools`
+  (le sidecar arrive avec M4) ;
+- `--player-dir` et `--fullscreen` pas encore utilisés ;
+- l'authentification reste celle de Prism : un compte Microsoft valide est
+  requis avant la tâche de lancement.
 
 Critère : partie lancée avec un vrai compte ; « Kill » arrête le processus ;
 un crash ouvre le rapport dans l'UI.
+
+Validé avec le vrai client (nightly 2026-11-13) : ressources préparées en
+98 s, lancement `--frames 2`, exit 0, première frame rendue, `smoke-report`
+sans erreur. Détails : [`fork/M3.md`](../fork/M3.md).
 
 ### M4 — préparation et réparation
 
