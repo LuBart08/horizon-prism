@@ -22,7 +22,7 @@ instance Prism  ──►  horizon-prepare  ──►  horizon-client
 | M1 | squelette du fork : type d'instance `Horizon` | ✅ compilé et testé |
 | M2 | page de réglages Horizon (canal, version, options) | à faire |
 | M3 | étape de lancement `HorizonLaunchStep`, session sur stdin | ✅ compilé et testé |
-| M4 | préparation/repair dans l'UI, progression | à faire |
+| M4 | préparation/repair automatique, progression | ✅ compilé et testé |
 | M5 | contenu Horizon (`.hmod`) via `horizon-prepare` | à faire |
 | M6 | packaging, updater, clés de signature | à faire |
 
@@ -200,7 +200,7 @@ mapping du crash, refus 26.2, session manquante, `--dry-run`, `--json` propre,
 Le plan du fork (M1–M6), l'architecture retenue et la carte des fichiers Prism
 à toucher sont dans [`docs/fork-plan.md`](docs/fork-plan.md).
 
-## Fork Prism (M1, M3)
+## Fork Prism (M1, M3, M4)
 
 Le fork vit dans [`fork/`](fork/) :
 
@@ -208,6 +208,8 @@ Le fork vit dans [`fork/`](fork/) :
   test, outillage sans administrateur, problème AGL du SDK macOS 26 ;
 - [`fork/M3.md`](fork/M3.md) : lancement réel de `horizon-client`, session
   sur stdin, résolution du binaire, test avec les vraies ressources ;
+- [`fork/M4.md`](fork/M4.md) : préparation automatique avec
+  `horizon-prepare --check`/`--prepare`, progression JSON, gaps optionnels ;
 - [`fork/patches/`](fork/patches/) : les commits à appliquer sur
   `PrismLauncher/develop` ;
 - [`fork/build-m1.sh`](fork/build-m1.sh) : configure + compile (Qt via `aqt`,

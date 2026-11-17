@@ -158,26 +158,33 @@ Validé avec le vrai client (nightly 2026-11-13) : ressources préparées en
 98 s, lancement `--frames 2`, exit 0, première frame rendue, `smoke-report`
 sans erreur. Détails : [`fork/M3.md`](../fork/M3.md).
 
-### M4 — préparation et réparation
+### M4 — préparation et réparation ✅ (implémenté)
 
 Objectif : premier lancement sans ligne de commande.
 
-- `launcher/launch/steps/HorizonPrepareStep.{h,cpp}` : enveloppe
-  `horizon-tools prepare` avec `--prism-dir <Prism root>` (ou l'instance),
-  `--output <instance>/horizon/resources`, `--progress json`, et
-  `--complete` quand l'utilisateur veut « rien ne manque ».
-- `--check` : les gaps optionnels (sons, packs, panorama, polices, langues)
-  ne doivent **pas** bloquer le lancement ; ils se proposent comme extras.
-- `launcher/ui/pages/instance/InstanceSettingsPage.cpp` : bouton
-  « Prepare / Repair » qui appelle `horizon-tools check`.
-- Java 25 : `launcher/java/JavaUtils.cpp` / `JavaInstall` pour localiser le
-  runtime ; ne pas en télécharger un si Horizon n'en a pas besoin au runtime
-  (seulement pour `horizon-prepare`).
-- Pas de téléchargement de jar serveur dans le chemin Prism : le client jar
-  Prism sert de côté serveur. Garder le téléchargement SHA-1 vérifié du spike
-  uniquement pour les préparateurs sans `--prism-dir`.
+Implémenté sur la branche `horizon/m4` :
+
+- `launcher/minecraft/launch/HorizonPrepareStep.{h,cpp}` : `--check`, puis
+  `horizon-prepare --prepare --output <instance>/horizon/resources
+  --prism-dir <Prism root ou instance> --java-home <Java 25> --progress json`
+  si nécessaire, puis re-`--check` ;
+- les gaps optionnels (sons, packs, panorama, polices, langues) ne bloquent
+  **pas** le lancement : ils sont signalés comme extras manquants ;
+- Java 25 : Prism `JavaPath` s'il correspond, sinon un runtime géré par Prism
+  (`<data>/java/*`), sinon `/usr/libexec/java_home -v 25` sur macOS ; aucun
+  téléchargement de runtime ;
+- pas de jar serveur : `--prism-dir` fait lire à `horizon-prepare` le client
+  jar et les assets de Prism.
+
+Écarts assumés par rapport au plan initial :
+
+- pas de bouton « Prepare / Repair » dans la page de réglages : la
+  préparation est déclenchée par « Play » ;
+- pas de `--complete` automatique (les extras restent optionnels).
 
 Critère : installation neuve → « Play » → préparation → partie, sans terminal.
+
+Détails et résultats : [`fork/M4.md`](../fork/M4.md).
 
 ### M5 — contenu Horizon
 
