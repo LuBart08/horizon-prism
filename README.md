@@ -221,6 +221,11 @@ Le fork vit dans [`fork/`](fork/) :
 - un stub `AGL.framework` vide, généré par `build-m1.sh` dans `fork/stubs/`
   (non versionné), pour contourner la disparition d'AGL dans le SDK macOS 26.
 
+Le fork Prism est publié sur
+**[github.com/LuBart08/horizon-prism-launcher](https://github.com/LuBart08/horizon-prism-launcher)**
+(branche par défaut `horizon/latest`, qui contient M1 + M3 + M4 + M2).
+Les branches `horizon/m1` à `horizon/m4` gardent chaque jalon séparé.
+
 Le clone complet de Prism (`fork/PrismLauncher/`) n'est **pas** versionné ici :
-il a son propre dépôt et sera publié comme fork GitHub séparé.
+il a son propre dépôt GitHub et suit `PrismLauncher/develop`.
 
