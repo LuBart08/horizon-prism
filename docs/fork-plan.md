@@ -197,22 +197,35 @@ Critère : installation neuve → « Play » → préparation → partie, sans t
 
 Détails et résultats : [`fork/M4.md`](../fork/M4.md).
 
-### M5 — contenu Horizon
+### M5 — contenu Horizon ✅ (compilé et testé)
 
 Objectif : gérer les `.hmod` (contenu) et `.hnmod` (natif) sans casser le
 modèle Prism.
 
-- `launcher/minecraft/mod/` : un `HorizonMod` léger (id, version, type
-  `content|native`, source) ; **ne pas** réutiliser `Mod` Java.
-- `launcher/modplatform/ModIndex.h` : un index Horizon (ou un index
-  « local » tant qu'il n'y a pas de registre public).
-- `launcher/ui/pages/modplatform/` : page « Horizon Content » (liste,
-  activer/désactiver, mettre à jour).
-- Les `.hnmod` natifs doivent être **construits** pour la plateforme : le
-  fork doit refuser proprement un `.hnmod` incompatible plutôt que de laisser
-  Horizon planter.
+Implémenté sur la branche `horizon/m5` :
+
+- `launcher/minecraft/mod/HorizonMod.{h,cpp}` : modèle léger (`id`, `name`,
+  `version`, `kind` `Content`/`Native`/`Both`, `folder`, `problem`, champs
+  natifs), scan de `horizon-mods/` et `horizon-native-mods/`, et
+  `HorizonModList` qui lit/écrit `horizon-mods.txt` avec les règles exactes
+  du jeu (contenu éteint par défaut, natif allumé sauf `false`, lignes
+  `key.*` préservées) ;
+- `launcher/ui/pages/instance/HorizonModsPage.{h,cpp}` : tableau
+  activé/nom/id/version/type/état, boutons Add/Remove/Refresh/Open folder ;
+- `launcher/InstancePageProvider.h` : page ajoutée aux instances Horizon,
+  pages de mods Java masquées ;
+- `tests/HorizonMod_test.cpp` : 9 tests (parse, sérialisation, scan,
+  manifestes combinés, aller-retour disque).
+
+Écarts assumés : pas d'index ni de téléchargement (pas de registre public
+interrogeable), pas de mise à jour automatique, pas de vérification de
+signature. Les `.hnmod` sont listés mais pas compilés : ce fork lance un
+`horizon-client` précompilé, et la page l'indique au lieu de laisser croire
+qu'ils tournent.
 
 Critère : ajouter/retirer un `.hmod`, relancer, voir le contenu actif.
+
+Détails : [`fork/M5.md`](../fork/M5.md).
 
 ### M6 — packaging
 

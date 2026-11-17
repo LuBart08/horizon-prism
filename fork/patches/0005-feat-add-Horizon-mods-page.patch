@@ -1,0 +1,1219 @@
+From 4ea95a688d5b5ce086f198ce0d8b3967b2d1aa5c Mon Sep 17 00:00:00 2001
+From: horizon-prism <horizon-prism@localhost>
+Date: Tue, 17 Nov 2026 10:32:28 +0100
+Subject: [PATCH] feat: add Horizon mods page (M5)
+
+- HorizonMod scans horizon-mods/ (.hmod, folder mods) and
+  horizon-native-mods/ (.hnmod, .hmod) and reads both manifests from the
+  zip or the folder;
+- HorizonModList parses and writes horizon-mods.txt with the game's rules:
+  content mods off until mod.<id>:true, native mods on until
+  mod.<id>:false, key.* lines preserved;
+- HorizonModsPage lists the mods with a checkbox, status column and
+  Add/Remove/Refresh/Open folder actions; broken files stay visible and
+  removable;
+- Horizon instances no longer show the Java mod pages;
+- HorizonMod_test covers parsing, serialization, scanning and disk round
+  trips (9 tests).
+
+Native mods are listed but not built into the game: this fork runs a
+prebuilt horizon-client, so the page says so instead of pretending.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ launcher/CMakeLists.txt                       |   4 +
+ launcher/InstancePageProvider.h               |  19 +-
+ launcher/minecraft/mod/HorizonMod.cpp         | 421 ++++++++++++++++++
+ launcher/minecraft/mod/HorizonMod.h           | 102 +++++
+ .../ui/pages/instance/HorizonModsPage.cpp     | 245 ++++++++++
+ launcher/ui/pages/instance/HorizonModsPage.h  |  66 +++
+ tests/CMakeLists.txt                          |   1 +
+ tests/HorizonMod_test.cpp                     | 236 ++++++++++
+ 8 files changed, 1088 insertions(+), 6 deletions(-)
+ create mode 100644 launcher/minecraft/mod/HorizonMod.cpp
+ create mode 100644 launcher/minecraft/mod/HorizonMod.h
+ create mode 100644 launcher/ui/pages/instance/HorizonModsPage.cpp
+ create mode 100644 launcher/ui/pages/instance/HorizonModsPage.h
+ create mode 100644 tests/HorizonMod_test.cpp
+
+diff --git a/launcher/CMakeLists.txt b/launcher/CMakeLists.txt
+index f0de96d..6d521e2 100644
+--- a/launcher/CMakeLists.txt
++++ b/launcher/CMakeLists.txt
+@@ -318,6 +318,8 @@ set(MINECRAFT_SOURCES
+     minecraft/WorldTasks.cpp
+ 
+     minecraft/mod/MetadataHandler.h
++    minecraft/mod/HorizonMod.h
++    minecraft/mod/HorizonMod.cpp
+     minecraft/mod/Mod.h
+     minecraft/mod/Mod.cpp
+     minecraft/mod/ModDetails.h
+@@ -915,6 +917,8 @@ SET(LAUNCHER_SOURCES
+     ui/pages/instance/LogPage.h
+     ui/pages/instance/HorizonSettingsPage.cpp
+     ui/pages/instance/HorizonSettingsPage.h
++    ui/pages/instance/HorizonModsPage.cpp
++    ui/pages/instance/HorizonModsPage.h
+     ui/pages/instance/InstanceSettingsPage.h
+     ui/pages/instance/ScreenshotsPage.cpp
+     ui/pages/instance/ScreenshotsPage.h
+diff --git a/launcher/InstancePageProvider.h b/launcher/InstancePageProvider.h
+index 0e5423a..82e2a68 100644
+--- a/launcher/InstancePageProvider.h
++++ b/launcher/InstancePageProvider.h
+@@ -5,6 +5,7 @@
+ #include "minecraft/MinecraftInstance.h"
+ #include "ui/pages/BasePage.h"
+ #include "ui/pages/BasePageProvider.h"
++#include "ui/pages/instance/HorizonModsPage.h"
+ #include "ui/pages/instance/HorizonSettingsPage.h"
+ #include "ui/pages/instance/InstanceSettingsPage.h"
+ #include "ui/pages/instance/LogPage.h"
+@@ -32,11 +33,17 @@ class InstancePageProvider : protected QObject, public BasePageProvider {
+         values.append(new LogPage(inst));
+         values.append(new VersionPage(inst));
+         values.append(ManagedPackPage::createPage(inst));
+-        auto modsPage = new ModFolderPage(inst, inst->loaderModList());
+-        modsPage->setFilter("%1 (*.zip *.jar *.litemod *.nilmod)");
+-        values.append(modsPage);
+-        values.append(new CoreModFolderPage(inst, inst->coreModList()));
+-        values.append(new NilModFolderPage(inst, inst->nilModList()));
++        auto* horizon = qobject_cast<HorizonInstance*>(inst);
++        if (horizon) {
++            // Java mods never run on Horizon: show the Horizon folders instead.
++            values.append(new HorizonModsPage(horizon));
++        } else {
++            auto modsPage = new ModFolderPage(inst, inst->loaderModList());
++            modsPage->setFilter("%1 (*.zip *.jar *.litemod *.nilmod)");
++            values.append(modsPage);
++            values.append(new CoreModFolderPage(inst, inst->coreModList()));
++            values.append(new NilModFolderPage(inst, inst->nilModList()));
++        }
+         values.append(new ResourcePackPage(inst, inst->resourcePackList()));
+         values.append(new GlobalDataPackPage(inst));
+         values.append(new TexturePackPage(inst, inst->texturePackList()));
+@@ -45,7 +52,7 @@ class InstancePageProvider : protected QObject, public BasePageProvider {
+         values.append(new WorldListPage(inst, inst->worldList()));
+         values.append(new ServersPage(inst));
+         values.append(new ScreenshotsPage(FS::PathCombine(inst->gameRoot(), "screenshots")));
+-        if (auto* horizon = qobject_cast<HorizonInstance*>(inst))
++        if (horizon)
+             values.append(new HorizonSettingsPage(horizon));
+         values.append(new InstanceSettingsPage(inst));
+         values.append(new OtherLogsPage("logs", tr("Other Logs"), "Other-Logs", inst));
+diff --git a/launcher/minecraft/mod/HorizonMod.cpp b/launcher/minecraft/mod/HorizonMod.cpp
+new file mode 100644
+index 0000000..6f68ab8
+--- /dev/null
++++ b/launcher/minecraft/mod/HorizonMod.cpp
+@@ -0,0 +1,421 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#include "HorizonMod.h"
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QRegularExpression>
++#include <QStringList>
++
++#include <toml++/toml.h>
++
++#include "FileSystem.h"
++#include "archive/ArchiveReader.h"
++
++namespace {
++constexpr auto CONTENT_MANIFEST = "horizon-mod.toml";
++constexpr auto NATIVE_MANIFEST = "horizon-native.json";
++
++bool validId(const QString& id)
++{
++    static const QRegularExpression re(QStringLiteral("^[a-z0-9_]{1,64}$"));
++    return re.match(id).hasMatch();
++}
++
++bool validRevision(const QString& revision)
++{
++    static const QRegularExpression re(QStringLiteral("^[0-9a-f]{40}$"));
++    return re.match(revision).hasMatch();
++}
++
++/// Reads a manifest from a zip; returns an empty array when it is absent.
++QByteArray readFromArchive(const QString& archive, const QString& entry)
++{
++    MMCZip::ArchiveReader reader(archive);
++    auto result = reader.readFile(entry);
++    if (!result) {
++        // Absent and unreadable both come back as an error; callers treat an
++        // absent manifest as "not this kind" and report the file separately.
++        return {};
++    }
++    return *result;
++}
++
++QString readFile(const QString& path, bool* ok)
++{
++    auto result = FS::read(path);
++    *ok = bool(result);
++    return result ? QString::fromUtf8(*result) : QString();
++}
++
++/// Fills the content fields of `mod` from `horizon-mod.toml`.
++/// Returns an error message, or an empty string on success.
++QString applyContentManifest(HorizonMod& mod, const QByteArray& data)
++{
++    toml::table table;
++#if TOML_EXCEPTIONS
++    try {
++        table = toml::parse(std::string_view(data.constData(), size_t(data.size())));
++    } catch (const std::exception& err) {
++        return QStringLiteral("horizon-mod.toml: %1").arg(QString::fromUtf8(err.what()));
++    }
++#else
++    toml::parse_result result = toml::parse(std::string_view(data.constData(), size_t(data.size())));
++    if (!result) {
++        return QStringLiteral("horizon-mod.toml: %1").arg(QString::fromStdString(result.error().description()));
++    }
++    table = std::move(result.table());
++#endif
++
++    auto str = [&table](const char* key) -> QString {
++        if (auto value = table[key].value<std::string>())
++            return QString::fromStdString(*value);
++        return {};
++    };
++
++    const auto id = str("id");
++    if (!validId(id))
++        return QStringLiteral("horizon-mod.toml: invalid id \"%1\" (expected [a-z0-9_]{1,64})").arg(id);
++
++    const auto version = str("version");
++    if (version.isEmpty())
++        return QStringLiteral("horizon-mod.toml: missing version");
++
++    const auto api = str("api");
++    if (api.isEmpty())
++        return QStringLiteral("horizon-mod.toml: missing api");
++
++    mod.id = id;
++    mod.name = str("name");
++    mod.version = version;
++    mod.description = str("description");
++    mod.api = api;
++
++    const auto side = str("side");
++    mod.side = side.isEmpty() ? QStringLiteral("client") : side;
++    if (mod.side != QLatin1String("client") && mod.side != QLatin1String("server") && mod.side != QLatin1String("both"))
++        return QStringLiteral("horizon-mod.toml: unknown side \"%1\"").arg(mod.side);
++
++    // A content mod declares the `registries` capability; a code mod doesn't.
++    bool registries = false;
++    if (auto caps = table["capabilities"].as_array()) {
++        for (const auto& cap : *caps) {
++            if (auto value = cap.value<std::string>(); value && *value == "registries")
++                registries = true;
++        }
++    }
++    if (api == QLatin1String("0.2") && !registries)
++        return QStringLiteral("horizon-mod.toml: api 0.2 without the registries capability");
++
++    return {};
++}
++
++/// Fills the native fields of `mod` from `horizon-native.json`.
++QString applyNativeManifest(HorizonMod& mod, const QByteArray& data)
++{
++    QJsonParseError parseError;
++    const auto document = QJsonDocument::fromJson(data, &parseError);
++    if (document.isNull())
++        return QStringLiteral("horizon-native.json: %1").arg(parseError.errorString());
++    if (!document.isObject())
++        return QStringLiteral("horizon-native.json: not an object");
++
++    const auto object = document.object();
++
++    const auto id = object.value("id").toString();
++    if (!validId(id))
++        return QStringLiteral("horizon-native.json: invalid id \"%1\"").arg(id);
++
++    const auto version = object.value("version").toString();
++    if (version.isEmpty())
++        return QStringLiteral("horizon-native.json: missing version");
++
++    const auto game = object.value("game").toString();
++    if (game.isEmpty())
++        return QStringLiteral("horizon-native.json: missing game");
++
++    const auto horizon = object.value("horizon").toString();
++    if (!validRevision(horizon))
++        return QStringLiteral("horizon-native.json: horizon is not a 40-character commit");
++
++    const auto mixins = object.value("mixins").toString();
++    if (!validRevision(mixins))
++        return QStringLiteral("horizon-native.json: mixins is not a 40-character commit");
++
++    if (object.value("schema").toInt() != 1)
++        return QStringLiteral("horizon-native.json: schema must be 1");
++
++    const auto hooksValue = object.value("hooks");
++    if (!hooksValue.isUndefined() && (!hooksValue.isDouble() || hooksValue.toInt() <= 0))
++        return QStringLiteral("horizon-native.json: hooks must be a positive number");
++
++    mod.id = id;
++    mod.version = version;
++    mod.game = game;
++    mod.horizonCommit = horizon;
++    mod.mixinsCommit = mixins;
++    mod.hooks = hooksValue.isUndefined() ? 0 : hooksValue.toInt();
++    if (mod.name.isEmpty())
++        mod.name = object.value("name").toString();
++
++    return {};
++}
++
++/// Reads both manifests of an archive into `mod`, setting its kind.
++void readArchive(HorizonMod& mod)
++{
++    const auto content = readFromArchive(mod.path, CONTENT_MANIFEST);
++    const auto native = readFromArchive(mod.path, NATIVE_MANIFEST);
++
++    if (content.isEmpty() && native.isEmpty()) {
++        mod.problem = QStringLiteral("no horizon-mod.toml or horizon-native.json");
++        return;
++    }
++
++    mod.kind = !native.isEmpty() ? (!content.isEmpty() ? HorizonMod::Kind::Both : HorizonMod::Kind::Native) : HorizonMod::Kind::Content;
++
++    if (!content.isEmpty()) {
++        auto problem = applyContentManifest(mod, content);
++        if (!problem.isEmpty())
++            mod.problem = problem;
++    }
++    if (!native.isEmpty()) {
++        const auto contentId = mod.id;
++        auto problem = applyNativeManifest(mod, native);
++        if (!problem.isEmpty())
++            mod.problem = problem;
++        else if (!contentId.isEmpty() && contentId != mod.id)
++            mod.problem = QStringLiteral("horizon-mod.toml and horizon-native.json name different ids");
++    }
++}
++
++/// Reads both manifests of a folder into `mod`, setting its kind.
++void readFolder(HorizonMod& mod)
++{
++    const auto contentPath = FS::PathCombine(mod.path, CONTENT_MANIFEST);
++    const auto nativePath = FS::PathCombine(mod.path, NATIVE_MANIFEST);
++
++    const bool hasContent = QFileInfo::exists(contentPath);
++    const bool hasNative = QFileInfo::exists(nativePath);
++    if (!hasContent && !hasNative) {
++        mod.problem = QStringLiteral("no manifest");
++        return;
++    }
++
++    mod.kind = hasNative && hasContent ? HorizonMod::Kind::Both : (hasNative ? HorizonMod::Kind::Native : HorizonMod::Kind::Content);
++
++    QString contentId;
++    if (hasContent) {
++        bool ok = false;
++        const auto text = readFile(contentPath, &ok);
++        if (!ok)
++            mod.problem = QStringLiteral("cannot read horizon-mod.toml");
++        else if (auto problem = applyContentManifest(mod, text.toUtf8()); !problem.isEmpty())
++            mod.problem = problem;
++        contentId = mod.id;
++    }
++    if (hasNative) {
++        bool ok = false;
++        const auto text = readFile(nativePath, &ok);
++        if (!ok)
++            mod.problem = QStringLiteral("cannot read horizon-native.json");
++        else if (auto problem = applyNativeManifest(mod, text.toUtf8()); !problem.isEmpty())
++            mod.problem = problem;
++        else if (!contentId.isEmpty() && contentId != mod.id)
++            mod.problem = QStringLiteral("horizon-mod.toml and horizon-native.json name different ids");
++    }
++}
++}  // namespace
++
++QString HorizonMod::title() const
++{
++    if (!name.isEmpty())
++        return name;
++    return QFileInfo(path).fileName();
++}
++
++QString HorizonMods::listPath(const QString& gameRoot)
++{
++    return FS::PathCombine(gameRoot, "horizon-mods.txt");
++}
++
++QString HorizonMods::contentDir(const QString& gameRoot)
++{
++    return FS::PathCombine(gameRoot, "horizon-mods");
++}
++
++QString HorizonMods::nativeDir(const QString& gameRoot)
++{
++    return FS::PathCombine(gameRoot, "horizon-native-mods");
++}
++
++QList<HorizonMod> HorizonMods::scan(const QString& gameRoot)
++{
++    QList<HorizonMod> mods;
++
++    auto scanDir = [&mods](const QString& dirPath, bool nativeFolder) {
++        QDir dir(dirPath);
++        if (!dir.exists())
++            return;
++
++        const auto entries = dir.entryInfoList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
++        for (const auto& info : entries) {
++            if (info.isDir()) {
++                HorizonMod mod;
++                mod.folder = true;
++                mod.path = info.filePath();
++                readFolder(mod);
++                if (mod.kind == HorizonMod::Kind::Content && nativeFolder)
++                    continue;  // not a native mod
++                mods.append(mod);
++                continue;
++            }
++
++            const auto suffix = info.suffix().toLower();
++            if (suffix == QLatin1String("jar")) {
++                HorizonMod mod;
++                mod.path = info.filePath();
++                mod.name = info.completeBaseName();
++                mod.problem = QStringLiteral("Java mods do not run on Horizon");
++                mods.append(mod);
++                continue;
++            }
++
++            if (suffix != QLatin1String("hmod") && suffix != QLatin1String("hnmod"))
++                continue;
++
++            HorizonMod mod;
++            mod.path = info.filePath();
++            readArchive(mod);
++            if (nativeFolder && mod.kind == HorizonMod::Kind::Content)
++                continue;  // a content mod left in the native folder
++            mods.append(mod);
++        }
++    };
++
++    scanDir(contentDir(gameRoot), false);
++    scanDir(nativeDir(gameRoot), true);
++    return mods;
++}
++
++HorizonModList HorizonModList::load(const QString& gameRoot)
++{
++    auto result = FS::read(HorizonMods::listPath(gameRoot));
++    if (!result)
++        return {};
++    return parse(QString::fromUtf8(*result));
++}
++
++HorizonModList HorizonModList::parse(const QString& text)
++{
++    HorizonModList list;
++
++    const auto lines = text.split('\n');
++    for (const auto& raw : lines) {
++        const auto line = raw.trimmed();
++        if (line.isEmpty())
++            continue;
++
++        const auto colon = line.indexOf(':');
++        if (colon < 0)
++            continue;
++
++        const auto key = line.left(colon).trimmed();
++        const auto value = line.mid(colon + 1).trimmed();
++
++        if (key.startsWith(QLatin1String("mod."))) {
++            const auto id = key.mid(4);
++            if (value == QLatin1String("true"))
++                list.m_enabled.insert(id);
++            else if (value == QLatin1String("false"))
++                list.m_disabled.insert(id);
++        } else if (key.startsWith(QLatin1String("key."))) {
++            const auto rest = key.mid(4);
++            const auto dot = rest.indexOf('.');
++            if (dot > 0) {
++                const auto id = rest.left(dot);
++                const auto name = rest.mid(dot + 1);
++                list.m_keys[id].insert(name, value);
++            }
++        }
++        // Anything else stays out of the model and is dropped on save, like
++        // the game's own parser (`mod_list.rs`) which only keeps these keys.
++    }
++
++    return list;
++}
++
++QString HorizonModList::serialize() const
++{
++    QStringList out;
++
++    auto enabled = m_enabled.values();
++    enabled.sort();
++    for (const auto& id : enabled)
++        out.append(QStringLiteral("mod.%1:true").arg(id));
++
++    auto disabled = m_disabled.values();
++    disabled.sort();
++    for (const auto& id : disabled)
++        out.append(QStringLiteral("mod.%1:false").arg(id));
++
++    for (auto it = m_keys.constBegin(); it != m_keys.constEnd(); ++it) {
++        for (auto key = it.value().constBegin(); key != it.value().constEnd(); ++key)
++            out.append(QStringLiteral("key.%1.%2:%3").arg(it.key(), key.key(), key.value()));
++    }
++
++    if (out.isEmpty())
++        return {};
++    return out.join('\n') + '\n';
++}
++
++bool HorizonModList::save(const QString& gameRoot) const
++{
++    const auto path = HorizonMods::listPath(gameRoot);
++    const auto text = serialize();
++    if (text.isEmpty() && !QFileInfo::exists(path))
++        return true;
++    return bool(FS::write(path, text.toUtf8()));
++}
++
++bool HorizonModList::isOn(const HorizonMod& mod) const
++{
++    if (mod.id.isEmpty())
++        return false;
++    // Native mods are built in, so on until turned off; content mods wait
++    // for an explicit `true`.
++    if (mod.isNative())
++        return !m_disabled.contains(mod.id);
++    return m_enabled.contains(mod.id);
++}
++
++void HorizonModList::setOn(const HorizonMod& mod, bool on)
++{
++    if (mod.id.isEmpty())
++        return;
++
++    if (mod.isNative()) {
++        if (on) {
++            m_disabled.remove(mod.id);
++            m_enabled.insert(mod.id);
++        } else {
++            m_enabled.remove(mod.id);
++            m_disabled.insert(mod.id);
++        }
++    } else if (on) {
++        m_enabled.insert(mod.id);
++    } else {
++        m_enabled.remove(mod.id);
++    }
++}
+diff --git a/launcher/minecraft/mod/HorizonMod.h b/launcher/minecraft/mod/HorizonMod.h
+new file mode 100644
+index 0000000..b32af86
+--- /dev/null
++++ b/launcher/minecraft/mod/HorizonMod.h
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#pragma once
++
++#include <QList>
++#include <QMap>
++#include <QSet>
++#include <QString>
++
++/*!
++ * A Horizon mod found in the game folder (milestone M5).
++ *
++ * Horizon has two kinds of mods, both documented in `docs/mods.md`:
++ * content mods (`.hmod`, data and assets) and native mods (`.hnmod`, Rust
++ * sources the launcher builds into the game). A `.hmod` may carry both.
++ *
++ * This is deliberately not Prism's Java `Mod`: the manifest, the folders and
++ * the enable/disable rules are Horizon's.
++ */
++struct HorizonMod {
++    enum class Kind {
++        Content,  ///< `horizon-mod.toml` only
++        Native,   ///< `horizon-native.json` only (`.hnmod`, or a code-only `.hmod`)
++        Both,     ///< one `.hmod` with both manifests
++    };
++
++    QString id;
++    QString name;
++    QString version;
++    QString description;
++    QString api;    ///< content API line: "0.1", "0.2" (content) or "0.3" (server)
++    QString side;   ///< content side: "client", "server" or "both"
++    Kind kind = Kind::Content;
++    bool folder = false;  ///< a folder with a manifest, run with `--dev-mod`
++    QString path;         ///< the file or the folder
++    QString problem;      ///< why it cannot run; empty when it looks fine
++
++    // Native manifest facts (`horizon-native.json`).
++    QString game;
++    QString horizonCommit;
++    QString mixinsCommit;
++    int hooks = 0;  ///< 0 when the manifest has no `hooks` field
++
++    bool isContent() const { return kind != Kind::Native; }
++    bool isNative() const { return kind != Kind::Content; }
++
++    /// The name to show: the manifest's, else the file name.
++    QString title() const;
++};
++
++/*!
++ * `horizon-mods.txt`, beside `options.txt`: which installed mods are on.
++ *
++ * The game's own rules (`horizon-client-render/src/mod_list.rs`):
++ * - a content mod is off until a `mod.<id>:true` line exists;
++ * - a native mod is on until a `mod.<id>:false` line exists;
++ * - `key.<id>.<name>:<key>` lines hold the player's key bindings and must be
++ *   preserved verbatim.
++ */
++class HorizonModList {
++   public:
++    static HorizonModList load(const QString& gameRoot);
++    /// Writes the file, unless the list is empty and no file exists yet.
++    bool save(const QString& gameRoot) const;
++
++    static HorizonModList parse(const QString& text);
++    QString serialize() const;
++
++    bool isOn(const HorizonMod& mod) const;
++    void setOn(const HorizonMod& mod, bool on);
++
++    QMap<QString, QString> keysOf(const QString& id) const { return m_keys.value(id); }
++
++    QSet<QString> enabled() const { return m_enabled; }
++    QSet<QString> disabled() const { return m_disabled; }
++
++   private:
++    QSet<QString> m_enabled;
++    QSet<QString> m_disabled;
++    QMap<QString, QMap<QString, QString>> m_keys;
++};
++
++namespace HorizonMods {
++/// `<gameRoot>/horizon-mods.txt`
++QString listPath(const QString& gameRoot);
++/// `<gameRoot>/horizon-mods`, the content mods' folder.
++QString contentDir(const QString& gameRoot);
++/// `<gameRoot>/horizon-native-mods`, where the launcher installs native mods.
++QString nativeDir(const QString& gameRoot);
++
++/// Scans both folders. Files that cannot be read come back with `problem`
++/// set instead of being dropped, so the page can show them.
++QList<HorizonMod> scan(const QString& gameRoot);
++}  // namespace HorizonMods
+diff --git a/launcher/ui/pages/instance/HorizonModsPage.cpp b/launcher/ui/pages/instance/HorizonModsPage.cpp
+new file mode 100644
+index 0000000..8b6d0b1
+--- /dev/null
++++ b/launcher/ui/pages/instance/HorizonModsPage.cpp
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#include "HorizonModsPage.h"
++
++#include <QDesktopServices>
++#include <QDir>
++#include <QFile>
++#include <QFileDialog>
++#include <QFileInfo>
++#include <QHBoxLayout>
++#include <QHeaderView>
++#include <QLabel>
++#include <QMessageBox>
++#include <QPushButton>
++#include <QTreeWidget>
++#include <QUrl>
++#include <QVBoxLayout>
++
++#include "FileSystem.h"
++#include "minecraft/HorizonInstance.h"
++
++namespace {
++QString kindLabel(const HorizonMod& mod)
++{
++    switch (mod.kind) {
++        case HorizonMod::Kind::Content:
++            return QObject::tr("Content");
++        case HorizonMod::Kind::Native:
++            return QObject::tr("Native");
++        case HorizonMod::Kind::Both:
++            return QObject::tr("Content + native");
++    }
++    return {};
++}
++
++QString statusLabel(const HorizonMod& mod)
++{
++    if (!mod.problem.isEmpty())
++        return mod.problem;
++    if (mod.isNative())
++        return QObject::tr("installed, not built into this game");
++    return QObject::tr("API %1, %2 side").arg(mod.api, mod.side);
++}
++}  // namespace
++
++HorizonModsPage::HorizonModsPage(HorizonInstance* instance, QWidget* parent) : QWidget(parent), m_instance(instance)
++{
++    auto* layout = new QVBoxLayout(this);
++
++    m_notice = new QLabel(this);
++    m_notice->setWordWrap(true);
++    layout->addWidget(m_notice);
++
++    m_summary = new QLabel(this);
++    layout->addWidget(m_summary);
++
++    m_tree = new QTreeWidget(this);
++    m_tree->setRootIsDecorated(false);
++    m_tree->setUniformRowHeights(true);
++    m_tree->setAlternatingRowColors(true);
++    m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
++    m_tree->setColumnCount(6);
++    m_tree->header()->setSectionResizeMode(1, QHeaderView::Stretch);
++    m_tree->header()->setSectionResizeMode(5, QHeaderView::Stretch);
++    layout->addWidget(m_tree, 1);
++
++    auto* buttons = new QHBoxLayout();
++    auto* add = new QPushButton(tr("Add…"), this);
++    auto* remove = new QPushButton(tr("Remove"), this);
++    auto* refreshButton = new QPushButton(tr("Refresh"), this);
++    auto* open = new QPushButton(tr("Open folder"), this);
++    buttons->addWidget(add);
++    buttons->addWidget(remove);
++    buttons->addWidget(refreshButton);
++    buttons->addStretch(1);
++    buttons->addWidget(open);
++    layout->addLayout(buttons);
++
++    connect(add, &QPushButton::clicked, this, &HorizonModsPage::addMods);
++    connect(remove, &QPushButton::clicked, this, &HorizonModsPage::removeSelected);
++    connect(refreshButton, &QPushButton::clicked, this, &HorizonModsPage::refresh);
++    connect(open, &QPushButton::clicked, this, &HorizonModsPage::openFolder);
++    connect(m_tree, &QTreeWidget::itemChanged, this, &HorizonModsPage::toggleItem);
++
++    retranslate();
++    refresh();
++}
++
++void HorizonModsPage::retranslate()
++{
++    m_notice->setText(tr("Native mods (.hnmod) are listed but not built into this game: this "
++                         "launcher runs a prebuilt horizon-client. Content mods (.hmod) are read "
++                         "by the game at start."));
++    m_tree->setHeaderLabels({ tr("On"), tr("Name"), tr("Id"), tr("Version"), tr("Kind"), tr("Status") });
++}
++
++void HorizonModsPage::openedImpl()
++{
++    refresh();
++}
++
++void HorizonModsPage::refresh()
++{
++    m_populating = true;
++    m_tree->clear();
++    m_mods = HorizonMods::scan(m_instance->gameRoot());
++    m_list = HorizonModList::load(m_instance->gameRoot());
++
++    int enabledCount = 0;
++    for (int i = 0; i < m_mods.size(); i++) {
++        const auto& mod = m_mods.at(i);
++        auto* item = new QTreeWidgetItem(m_tree);
++        item->setText(1, mod.title());
++        item->setText(2, mod.id);
++        item->setText(3, mod.version);
++        item->setText(4, kindLabel(mod));
++        item->setText(5, statusLabel(mod));
++        item->setToolTip(1, mod.path);
++
++        const bool canToggle = !mod.id.isEmpty() && mod.problem.isEmpty();
++        if (canToggle) {
++            item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
++            item->setCheckState(0, m_list.isOn(mod) ? Qt::Checked : Qt::Unchecked);
++        } else {
++            // Broken or unreadable: still selectable for removal, but no box.
++            item->setFlags(item->flags() & ~Qt::ItemIsUserCheckable);
++        }
++        if (m_list.isOn(mod))
++            enabledCount++;
++        item->setData(0, Qt::UserRole, i);
++    }
++
++    m_tree->resizeColumnToContents(0);
++    m_tree->resizeColumnToContents(2);
++    m_tree->resizeColumnToContents(3);
++    m_tree->resizeColumnToContents(4);
++
++    m_summary->setText(tr("%1 mod(s) found, %2 on.").arg(m_mods.size()).arg(enabledCount));
++    m_populating = false;
++}
++
++void HorizonModsPage::toggleItem(QTreeWidgetItem* item, int column)
++{
++    if (m_populating || column != 0)
++        return;
++
++    const int index = item->data(0, Qt::UserRole).toInt();
++    if (index < 0 || index >= m_mods.size())
++        return;
++
++    const auto& mod = m_mods.at(index);
++    m_list.setOn(mod, item->checkState(0) == Qt::Checked);
++    m_list.save(m_instance->gameRoot());
++
++    // Keep the summary in sync without rescanning the folders.
++    int enabledCount = 0;
++    for (const auto& candidate : m_mods) {
++        if (m_list.isOn(candidate))
++            enabledCount++;
++    }
++    m_summary->setText(tr("%1 mod(s) found, %2 on.").arg(m_mods.size()).arg(enabledCount));
++}
++
++void HorizonModsPage::addMods()
++{
++    const auto files = QFileDialog::getOpenFileNames(this, tr("Add Horizon mods"), QDir::homePath(),
++                                                     tr("Horizon mods (*.hmod *.hnmod);;All files (*)"));
++    if (files.isEmpty())
++        return;
++
++    QStringList copied;
++    QStringList failed;
++
++    for (const auto& file : files) {
++        const QFileInfo info(file);
++        const bool native = info.suffix().compare(QLatin1String("hnmod"), Qt::CaseInsensitive) == 0;
++        const auto folder = native ? HorizonMods::nativeDir(m_instance->gameRoot()) : HorizonMods::contentDir(m_instance->gameRoot());
++        if (!FS::ensureFolderPathExists(folder)) {
++            failed.append(info.fileName());
++            continue;
++        }
++
++        QString target = FS::PathCombine(folder, info.fileName());
++        for (int i = 1; QFileInfo::exists(target); i++)
++            target = FS::PathCombine(folder, QStringLiteral("%1-%2.%3").arg(info.completeBaseName()).arg(i).arg(info.suffix()));
++
++        if (QFile::copy(file, target))
++            copied.append(QFileInfo(target).fileName());
++        else
++            failed.append(info.fileName());
++    }
++
++    refresh();
++
++    if (!failed.isEmpty())
++        QMessageBox::warning(this, tr("Add Horizon mods"), tr("Could not copy: %1").arg(failed.join(QStringLiteral(", "))));
++}
++
++void HorizonModsPage::removeSelected()
++{
++    const auto items = m_tree->selectedItems();
++    if (items.isEmpty())
++        return;
++
++    QStringList names;
++    for (const auto* item : items)
++        names.append(item->text(1));
++
++    if (QMessageBox::question(this, tr("Remove Horizon mods"), tr("Remove %1?").arg(names.join(QStringLiteral(", ")))) != QMessageBox::Yes)
++        return;
++
++    for (const auto* item : items) {
++        const int index = item->data(0, Qt::UserRole).toInt();
++        if (index < 0 || index >= m_mods.size())
++            continue;
++        const auto& mod = m_mods.at(index);
++        if (mod.folder)
++            QDir(mod.path).removeRecursively();
++        else
++            QFile::remove(mod.path);
++    }
++
++    refresh();
++}
++
++void HorizonModsPage::openFolder()
++{
++    const auto folder = HorizonMods::contentDir(m_instance->gameRoot());
++    FS::ensureFolderPathExists(folder);
++    QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
++}
++
++bool HorizonModsPage::apply()
++{
++    m_list.save(m_instance->gameRoot());
++    return true;
++}
+diff --git a/launcher/ui/pages/instance/HorizonModsPage.h b/launcher/ui/pages/instance/HorizonModsPage.h
+new file mode 100644
+index 0000000..69930fe
+--- /dev/null
++++ b/launcher/ui/pages/instance/HorizonModsPage.h
+@@ -0,0 +1,66 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#pragma once
++
++#include <QList>
++#include <QWidget>
++
++#include "minecraft/mod/HorizonMod.h"
++#include "ui/pages/BasePage.h"
++
++class HorizonInstance;
++class QLabel;
++class QTreeWidget;
++class QTreeWidgetItem;
++
++/*!
++ * Milestone M5: the Horizon content page.
++ *
++ * Lists `.hmod` content mods and `.hnmod` native mods found in the instance's
++ * game folder, turns them on and off by editing `horizon-mods.txt`, and
++ * copies new files into the right folder.
++ *
++ * This fork launches a prebuilt `horizon-client`: native mods are shown, but
++ * they are not built into the game, so the page says so instead of pretending
++ * they run.
++ */
++class HorizonModsPage : public QWidget, public BasePage {
++    Q_OBJECT
++
++   public:
++    explicit HorizonModsPage(HorizonInstance* instance, QWidget* parent = nullptr);
++    ~HorizonModsPage() override = default;
++
++    QString displayName() const override { return tr("Horizon Mods"); }
++    QIcon icon() const override { return QIcon::fromTheme("mods"); }
++    QString id() const override { return "horizon-mods"; }
++    QString helpPage() const override { return "Mods"; }
++
++    bool apply() override;
++    void openedImpl() override;
++    void retranslate() override;
++
++   private:
++    void refresh();
++    void addMods();
++    void removeSelected();
++    void openFolder();
++    void toggleItem(QTreeWidgetItem* item, int column);
++
++    HorizonInstance* m_instance;
++    HorizonModList m_list;
++    QList<HorizonMod> m_mods;
++
++    QLabel* m_notice = nullptr;
++    QLabel* m_summary = nullptr;
++    QTreeWidget* m_tree = nullptr;
++    bool m_populating = false;
++};
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index 6bd5fc4..d8e513d 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -26,6 +26,7 @@ set(TEST_SOURCES
+     CatPack_test.cpp
+     XmlLogs_test.cpp
+     Commandline_test.cpp
++    HorizonMod_test.cpp
+ )
+ 
+ # NOTE(@getchoo): Very funny way of aliasing the Qt generated `main` test functions to respective filenames
+diff --git a/tests/HorizonMod_test.cpp b/tests/HorizonMod_test.cpp
+new file mode 100644
+index 0000000..2af845e
+--- /dev/null
++++ b/tests/HorizonMod_test.cpp
+@@ -0,0 +1,236 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#include <QDir>
++#include <QFile>
++#include <QTemporaryDir>
++#include <QTest>
++
++#include "FileSystem.h"
++#include "archive/ArchiveWriter.h"
++#include "minecraft/mod/HorizonMod.h"
++
++namespace {
++constexpr auto CONTENT_TOML = R"(id = "coords_hud"
++name = "Coords HUD"
++version = "1.2.0"
++api = "0.2"
++side = "client"
++capabilities = ["registries"]
++)";
++
++constexpr auto NATIVE_JSON = R"({
++  "schema": 1,
++  "id": "jade",
++  "version": "26.3.8",
++  "game": "26.3",
++  "horizon": "6560641ba51a452f6bc2407baa4eb1b3be517ca8",
++  "mixins": "5a64af938ec86b00d53d16a408aabc0038fb3e57",
++  "hooks": 411
++})";
++
++bool writeArchive(const QString& path, const QList<QPair<QString, QByteArray>>& files)
++{
++    MMCZip::ArchiveWriter writer(path);
++    if (!writer.open())
++        return false;
++    for (const auto& [name, data] : files) {
++        if (!writer.addFile(name, data))
++            return false;
++    }
++    return bool(writer.close());
++}
++}  // namespace
++
++class HorizonModTest : public QObject {
++    Q_OBJECT
++   private slots:
++    void parsesTheGameList()
++    {
++        const auto list = HorizonModList::parse(
++            "mod.coords_hud:true\n"
++            "mod.other:false\n"
++            "key.zoom.zoom.in:key.mouse.4\n"
++            "key.zoom.out:key.keyboard.x\n"
++            "unrelated:true\n");
++
++        QVERIFY(list.enabled().contains("coords_hud"));
++        QVERIFY(list.disabled().contains("other"));
++        QCOMPARE(list.keysOf("zoom").value("zoom.in"), QStringLiteral("key.mouse.4"));
++        QCOMPARE(list.keysOf("zoom").value("out"), QStringLiteral("key.keyboard.x"));
++        QVERIFY(list.keysOf("missing").isEmpty());
++
++        // Serialization is deterministic: mods first, sorted, then keys.
++        const auto text = list.serialize();
++        QCOMPARE(text, QStringLiteral("mod.coords_hud:true\nmod.other:false\n"
++                                      "key.zoom.out:key.keyboard.x\nkey.zoom.zoom.in:key.mouse.4\n"));
++        QCOMPARE(HorizonModList::parse(text).serialize(), text);
++    }
++
++    void contentIsOffUntilTurnedOn()
++    {
++        HorizonMod content;
++        content.id = "coords_hud";
++        content.kind = HorizonMod::Kind::Content;
++
++        HorizonModList list;
++        QVERIFY(!list.isOn(content));
++        list.setOn(content, true);
++        QVERIFY(list.isOn(content));
++        QCOMPARE(list.serialize(), QStringLiteral("mod.coords_hud:true\n"));
++        list.setOn(content, false);
++        QVERIFY(!list.isOn(content));
++        QCOMPARE(list.serialize(), QString());
++    }
++
++    void nativeIsOnUntilTurnedOff()
++    {
++        HorizonMod native;
++        native.id = "jade";
++        native.kind = HorizonMod::Kind::Native;
++
++        HorizonModList list;
++        QVERIFY(list.isOn(native));
++        list.setOn(native, false);
++        QVERIFY(!list.isOn(native));
++        QCOMPARE(list.serialize(), QStringLiteral("mod.jade:false\n"));
++        list.setOn(native, true);
++        QVERIFY(list.isOn(native));
++        QCOMPARE(list.serialize(), QStringLiteral("mod.jade:true\n"));
++    }
++
++    void scansFilesAndFolders()
++    {
++        QTemporaryDir dir;
++        QVERIFY(dir.isValid());
++        const auto gameRoot = dir.path();
++        const auto contentDir = HorizonMods::contentDir(gameRoot);
++        const auto nativeDir = HorizonMods::nativeDir(gameRoot);
++        QVERIFY(FS::ensureFolderPathExists(contentDir));
++        QVERIFY(FS::ensureFolderPathExists(nativeDir));
++
++        QVERIFY(writeArchive(FS::PathCombine(contentDir, "coords_hud.hmod"),
++                             { { "horizon-mod.toml", QByteArray(CONTENT_TOML) }, { "data/coords_hud/x.json", "{}" } }));
++        QVERIFY(writeArchive(FS::PathCombine(nativeDir, "jade.hnmod"), { { "horizon-native.json", QByteArray(NATIVE_JSON) } }));
++        QVERIFY(writeArchive(FS::PathCombine(contentDir, "broken.hmod"), { { "assets/x/y.png", "x" } }));
++
++        // A folder mod, as a developer runs it with --dev-mod.
++        const auto folder = FS::PathCombine(contentDir, "dev_mod");
++        QVERIFY(FS::ensureFolderPathExists(folder));
++        QFile toml(FS::PathCombine(folder, "horizon-mod.toml"));
++        QVERIFY(toml.open(QIODevice::WriteOnly));
++        toml.write(R"(id = "dev_mod"
++name = "Dev mod"
++version = "0.0.1"
++api = "0.1"
++)");
++        toml.close();
++
++        const auto mods = HorizonMods::scan(gameRoot);
++        QCOMPARE(mods.size(), 4);
++
++        auto byPath = [&mods](const QString& name) -> const HorizonMod* {
++            for (const auto& mod : mods) {
++                if (QFileInfo(mod.path).fileName() == name)
++                    return &mod;
++            }
++            return nullptr;
++        };
++
++        const auto* content = byPath("coords_hud.hmod");
++        QVERIFY(content);
++        QCOMPARE(content->id, QStringLiteral("coords_hud"));
++        QCOMPARE(content->name, QStringLiteral("Coords HUD"));
++        QCOMPARE(content->version, QStringLiteral("1.2.0"));
++        QCOMPARE(content->kind, HorizonMod::Kind::Content);
++        QVERIFY(content->problem.isEmpty());
++        QVERIFY(!content->folder);
++
++        const auto* native = byPath("jade.hnmod");
++        QVERIFY(native);
++        QCOMPARE(native->id, QStringLiteral("jade"));
++        QCOMPARE(native->kind, HorizonMod::Kind::Native);
++        QCOMPARE(native->hooks, 411);
++        QCOMPARE(native->game, QStringLiteral("26.3"));
++        QVERIFY(native->problem.isEmpty());
++
++        const auto* broken = byPath("broken.hmod");
++        QVERIFY(broken);
++        QVERIFY(!broken->problem.isEmpty());
++        QVERIFY(broken->id.isEmpty());
++
++        const auto* dev = byPath("dev_mod");
++        QVERIFY(dev);
++        QCOMPARE(dev->id, QStringLiteral("dev_mod"));
++        QVERIFY(dev->folder);
++        QVERIFY(dev->problem.isEmpty());
++    }
++
++    void combinedFileNeedsTheSameId()
++    {
++        QTemporaryDir dir;
++        QVERIFY(dir.isValid());
++        const auto contentDir = HorizonMods::contentDir(dir.path());
++        QVERIFY(FS::ensureFolderPathExists(contentDir));
++
++        const QByteArray otherNative = R"({
++          "schema": 1,
++          "id": "other",
++          "version": "1",
++          "game": "26.3",
++          "horizon": "6560641ba51a452f6bc2407baa4eb1b3be517ca8",
++          "mixins": "5a64af938ec86b00d53d16a408aabc0038fb3e57"
++        })";
++
++        QVERIFY(writeArchive(FS::PathCombine(contentDir, "mixed.hmod"),
++                             { { "horizon-mod.toml", QByteArray(CONTENT_TOML) }, { "horizon-native.json", otherNative } }));
++
++        const auto mods = HorizonMods::scan(dir.path());
++        QCOMPARE(mods.size(), 1);
++        QCOMPARE(mods.first().kind, HorizonMod::Kind::Both);
++        QVERIFY(mods.first().problem.contains(QLatin1String("different ids")));
++    }
++
++    void roundTripsTheListOnDisk()
++    {
++        QTemporaryDir dir;
++        QVERIFY(dir.isValid());
++
++        HorizonModList list;
++        HorizonMod content;
++        content.id = "coords_hud";
++        content.kind = HorizonMod::Kind::Content;
++        HorizonMod native;
++        native.id = "jade";
++        native.kind = HorizonMod::Kind::Native;
++
++        list.setOn(content, true);
++        list.setOn(native, false);
++        QVERIFY(list.save(dir.path()));
++        QVERIFY(QFileInfo::exists(HorizonMods::listPath(dir.path())));
++
++        const auto reloaded = HorizonModList::load(dir.path());
++        QVERIFY(reloaded.isOn(content));
++        QVERIFY(!reloaded.isOn(native));
++        QCOMPARE(reloaded.serialize(), list.serialize());
++    }
++
++    void doesNotWriteAnEmptyFile()
++    {
++        QTemporaryDir dir;
++        QVERIFY(dir.isValid());
++        QVERIFY(HorizonModList().save(dir.path()));
++        QVERIFY(!QFileInfo::exists(HorizonMods::listPath(dir.path())));
++    }
++};
++
++QTEST_GUILESS_MAIN(HorizonModTest)
++
++#include "HorizonMod_test.moc"
+-- 
+2.50.1 (Apple Git-155)
+
