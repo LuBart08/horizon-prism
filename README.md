@@ -20,7 +20,7 @@ instance Prism  ──►  horizon-prepare  ──►  horizon-client
 |---|---|---|
 | M0 | spike hors fork, flux complet, vrais binaires | ✅ validé |
 | M1 | squelette du fork : type d'instance `Horizon` | ✅ compilé et testé |
-| M2 | page de réglages Horizon (canal, version, options) | à faire |
+| M2 | page de réglages Horizon (canal, versions, plein écran) | ✅ compilé et testé |
 | M3 | étape de lancement `HorizonLaunchStep`, session sur stdin | ✅ compilé et testé |
 | M4 | préparation/repair automatique, progression | ✅ compilé et testé |
 | M5 | contenu Horizon (`.hmod`) via `horizon-prepare` | à faire |
@@ -200,12 +200,14 @@ mapping du crash, refus 26.2, session manquante, `--dry-run`, `--json` propre,
 Le plan du fork (M1–M6), l'architecture retenue et la carte des fichiers Prism
 à toucher sont dans [`docs/fork-plan.md`](docs/fork-plan.md).
 
-## Fork Prism (M1, M3, M4)
+## Fork Prism (M1, M2, M3, M4)
 
 Le fork vit dans [`fork/`](fork/) :
 
 - [`fork/M1.md`](fork/M1.md) : type d'instance, création d'une instance de
   test, outillage sans administrateur, problème AGL du SDK macOS 26 ;
+- [`fork/M2.md`](fork/M2.md) : onglet « Horizon » (canal, versions
+  épinglées, plein écran) ;
 - [`fork/M3.md`](fork/M3.md) : lancement réel de `horizon-client`, session
   sur stdin, résolution du binaire, test avec les vraies ressources ;
 - [`fork/M4.md`](fork/M4.md) : préparation automatique avec

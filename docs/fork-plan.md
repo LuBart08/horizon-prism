@@ -107,19 +107,30 @@ Reste hors M1 : la création depuis la boîte de dialogue « New Instance »
 Critère : une instance Horizon se charge, s'affiche avec « Horizon … not
 prepared », et « Play » échoue avec un message clair sans rien télécharger.
 
-### M2 — page de réglages
+### M2 — page de réglages ✅ (compilé et testé)
 
 Objectif : choisir canal/version et quelques options sans éditer de JSON.
 
-- `launcher/ui/pages/instance/HorizonSettingsPage.{h,cpp}` : canal
-  (stable/beta/pinned), version Horizon, `launch_api` attendu (lecture seule),
-  options de jeu (render distance, vsync, fullscreen).
-- `launcher/ui/pages/instance/InstanceSettingsPage.cpp` : ajouter l'onglet.
-- `launcher/instance/HorizonInstance.cpp` : validation (version connue,
-  `launch_api` compatible avec le binaire installé).
+Implémenté sur la branche `horizon/m2` :
+
+- `launcher/ui/pages/instance/HorizonSettingsPage.{h,cpp}` : onglet
+  « Horizon » (canal, versions client/préparateur, plein écran) ;
+- valeurs du contrat (`launch_api`, `output_version`, `native_hooks_api`,
+  version Minecraft) en lecture seule ;
+- `launcher/InstancePageProvider.h` : onglet ajouté uniquement pour les
+  instances `Horizon` ;
+- `launcher/minecraft/HorizonInstance.cpp` : `fullscreen`,
+  `installedVersions()` ;
+- `launcher/minecraft/launch/HorizonLaunchStep.cpp` : `--fullscreen` quand
+  l'option est active.
+
+Écarts assumés : pas de render distance/vsync (absents du contrat
+`--launch-api`), canal informatif tant que M6 ne gère pas les mises à jour.
 
 Critère : les réglages persistent dans `horizon.json` et survivent à un
 redémarrage.
+
+Détails : [`fork/M2.md`](../fork/M2.md).
 
 ### M3 — lancement ✅ (compilé et testé)
 
