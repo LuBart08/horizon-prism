@@ -1,4 +1,4 @@
-From 56acaa29e40c0b6a4baf447e0586d03ac5ed6be6 Mon Sep 17 00:00:00 2001
+From 74888f717c79db4e96ebbeed49cdc7e1d450f988 Mon Sep 17 00:00:00 2001
 From: horizon-prism <horizon-prism@localhost>
 Date: Wed, 18 Nov 2026 11:06:18 +0100
 Subject: [PATCH] feat: add fork branding (M6)
@@ -22,18 +22,18 @@ Subject: [PATCH] feat: add fork branding (M6)
 
 Co-authored-by: Claude <noreply@anthropic.com>
 ---
- .github/workflows/horizon.yml | 89 +++++++++++++++++++++++++++++++++++
+ .github/workflows/horizon.yml | 92 +++++++++++++++++++++++++++++++++++
  CMakeLists.txt                | 49 ++++++++++++++++---
- program_info/CMakeLists.txt   | 76 +++++++++++++++++++++---------
- 3 files changed, 184 insertions(+), 30 deletions(-)
+ program_info/CMakeLists.txt   | 76 ++++++++++++++++++++---------
+ 3 files changed, 187 insertions(+), 30 deletions(-)
  create mode 100644 .github/workflows/horizon.yml
 
 diff --git a/.github/workflows/horizon.yml b/.github/workflows/horizon.yml
 new file mode 100644
-index 0000000..c3eebc9
+index 0000000..f2b0c5d
 --- /dev/null
 +++ b/.github/workflows/horizon.yml
-@@ -0,0 +1,89 @@
+@@ -0,0 +1,92 @@
 +name: Horizon fork
 +
 +# Builds the fork with its own branding (HORIZON_FORK=ON) and runs the unit
@@ -68,15 +68,18 @@ index 0000000..c3eebc9
 +            artifact-name: macOS
 +            qt-version: 6.11.2
 +            macosx-deployment-target: 13.0
++            cmake-osx-architectures: x86_64;arm64
 +
 +          - os: ubuntu-24.04
 +            artifact-name: Linux
 +            qt-version: 6.11.2
++            cmake-osx-architectures: ''
 +
 +          - os: windows-2022
 +            artifact-name: Windows-MSVC
 +            vcvars-arch: amd64
 +            qt-version: 6.11.2
++            cmake-osx-architectures: ''
 +
 +    runs-on: ${{ matrix.os }}
 +
@@ -85,7 +88,7 @@ index 0000000..c3eebc9
 +      BUILD_PLATFORM: horizon-prism
 +      BUILD_TYPE: Debug
 +      CMAKE_PRESET: default
-+      CMAKE_OSX_ARCHITECTURES: ${{ runner.os == 'macOS' && 'x86_64;arm64' || '' }}
++      CMAKE_OSX_ARCHITECTURES: ${{ matrix.cmake-osx-architectures }}
 +      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx-deployment-target }}
 +
 +    steps:
