@@ -1,0 +1,338 @@
+From 56acaa29e40c0b6a4baf447e0586d03ac5ed6be6 Mon Sep 17 00:00:00 2001
+From: horizon-prism <horizon-prism@localhost>
+Date: Wed, 18 Nov 2026 11:06:18 +0100
+Subject: [PATCH] feat: add fork branding (M6)
+
+- HORIZON_FORK (OFF by default) renames the binary to horizon-prism, the
+  bundle to dev.playhorizon.HorizonPrismLauncher and the internal name to
+  HorizonPrismLauncher, which gives the fork its own data folder
+  (~/Library/Application Support/HorizonPrismLauncher) and its own
+  HORIZONPRISMLAUNCHER_DATA_DIR, so it can live beside Prism;
+- program_info keeps Prism's artwork files as inputs but writes them under
+  the fork's installed names; the Qt resource keeps the name
+  prismlauncher.qrc because main.cpp calls Q_INIT_RESOURCE(prismlauncher);
+- macOS install destinations follow the bundle CMake actually produces
+  (horizon-prism.app, from OUTPUT_NAME), so the icon lands in the right
+  bundle;
+- the GitHub updater points at this repository on Windows and Linux;
+  Sparkle is disabled on macOS because the fork has no key, and Prism's
+  feed would offer upstream releases;
+- .github/workflows/horizon.yml builds and tests the fork on macOS, Linux
+  and Windows and uploads an unsigned macOS artifact.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ .github/workflows/horizon.yml | 89 +++++++++++++++++++++++++++++++++++
+ CMakeLists.txt                | 49 ++++++++++++++++---
+ program_info/CMakeLists.txt   | 76 +++++++++++++++++++++---------
+ 3 files changed, 184 insertions(+), 30 deletions(-)
+ create mode 100644 .github/workflows/horizon.yml
+
+diff --git a/.github/workflows/horizon.yml b/.github/workflows/horizon.yml
+new file mode 100644
+index 0000000..c3eebc9
+--- /dev/null
++++ b/.github/workflows/horizon.yml
+@@ -0,0 +1,89 @@
++name: Horizon fork
++
++# Builds the fork with its own branding (HORIZON_FORK=ON) and runs the unit
++# tests on the three desktop platforms. Unlike Prism's own workflow this does
++# not sign or publish anything: signing keys belong to whoever distributes the
++# build (see fork/M6.md).
++
++on:
++  push:
++    branches:
++      - horizon/latest
++      - 'horizon/**'
++  pull_request:
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++concurrency:
++  group: ${{ github.workflow }}-${{ github.ref }}
++  cancel-in-progress: true
++
++jobs:
++  build:
++    name: Build (${{ matrix.artifact-name }})
++
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - os: macos-26
++            artifact-name: macOS
++            qt-version: 6.11.2
++            macosx-deployment-target: 13.0
++
++          - os: ubuntu-24.04
++            artifact-name: Linux
++            qt-version: 6.11.2
++
++          - os: windows-2022
++            artifact-name: Windows-MSVC
++            vcvars-arch: amd64
++            qt-version: 6.11.2
++
++    runs-on: ${{ matrix.os }}
++
++    env:
++      ARTIFACT_NAME: ${{ matrix.artifact-name }}-Qt6
++      BUILD_PLATFORM: horizon-prism
++      BUILD_TYPE: Debug
++      CMAKE_PRESET: default
++      CMAKE_OSX_ARCHITECTURES: ${{ runner.os == 'macOS' && 'x86_64;arm64' || '' }}
++      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macosx-deployment-target }}
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v7
++        with:
++          submodules: true
++
++      - name: Setup dependencies
++        uses: ./.github/actions/setup-dependencies
++        with:
++          build-type: ${{ env.BUILD_TYPE }}
++          artifact-name: ${{ matrix.artifact-name }}
++          vcvars-arch: ${{ matrix.vcvars-arch }}
++          qt-version: ${{ matrix.qt-version }}
++
++      - name: Configure
++        run: cmake --preset "$CMAKE_PRESET" -D HORIZON_FORK=ON
++
++      - name: Build
++        run: cmake --build --preset "$CMAKE_PRESET" --config "$BUILD_TYPE"
++
++      - name: Test
++        run: ctest --preset "$CMAKE_PRESET" --build-config "$BUILD_TYPE" --output-on-failure
++
++      - name: Package (macOS, unsigned)
++        if: ${{ runner.os == 'macOS' }}
++        run: |
++          ditto -c -k --keepParent build/horizon-prism.app HorizonPrismLauncher-macOS-unsigned.zip
++
++      - name: Upload macOS artifact
++        if: ${{ runner.os == 'macOS' }}
++        uses: actions/upload-artifact@v4
++        with:
++          name: HorizonPrismLauncher-macOS-unsigned
++          path: HorizonPrismLauncher-macOS-unsigned.zip
++          if-no-files-found: error
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6a82bc6..ef6257a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -173,6 +173,10 @@ set(CMAKE_MODULE_PATH "${ECM_MODULE_PATH};${CMAKE_MODULE_PATH}")
+ 
+ include(CTest)
+ 
++##################################### Fork options #####################################
++
++option(HORIZON_FORK "Build the Horizon Prism Launcher fork branding (separate name, app id, data folder and updater)" OFF)
++
+ ##################################### Set Application options #####################################
+ 
+ ######## Set URLs ########
+@@ -201,6 +205,19 @@ set(Launcher_UPDATER_GITHUB_REPO "https://github.com/PrismLauncher/PrismLauncher
+ # Name to help updater identify valid artifacts
+ set(Launcher_BUILD_ARTIFACT "" CACHE STRING "Artifact name to help the updater identify valid artifacts.")
+ 
++if(HORIZON_FORK AND NOT APPLE)
++    # The fork's releases live in its own repository, and its assets follow
++    # the same platform naming the updater already understands.
++    set(Launcher_UPDATER_GITHUB_REPO "https://github.com/LuBart08/horizon-prism-launcher")
++    if(Launcher_BUILD_ARTIFACT STREQUAL "")
++        if(WIN32)
++            set(Launcher_BUILD_ARTIFACT "windows-x86_64")
++        else()
++            set(Launcher_BUILD_ARTIFACT "linux-x86_64")
++        endif()
++    endif()
++endif()
++
+ # The metadata server
+ set(Launcher_META_URL "https://meta.prismlauncher.org/v1/" CACHE STRING "URL to fetch Launcher's meta files from.")
+ 
+@@ -384,6 +401,9 @@ include(ECMQtDeclareLoggingCategory)
+ ####################################### Program Info #######################################
+ 
+ set(Launcher_APP_BINARY_NAME "prismlauncher" CACHE STRING "Name of the Launcher binary")
++if(HORIZON_FORK)
++    set(Launcher_APP_BINARY_NAME "horizon-prism")
++endif()
+ add_subdirectory(program_info)
+ 
+ ####################################### Install layout #######################################
+@@ -401,12 +421,19 @@ if(NOT (UNIX AND APPLE))
+ endif()
+ 
+ if(UNIX AND APPLE)
+-    set(BINARY_DEST_DIR "${Launcher_Name}.app/Contents/MacOS")
+-    set(LIBRARY_DEST_DIR "${Launcher_Name}.app/Contents/MacOS")
+-    set(PLUGIN_DEST_DIR "${Launcher_Name}.app/Contents/MacOS")
+-    set(FRAMEWORK_DEST_DIR "${Launcher_Name}.app/Contents/Frameworks")
+-    set(RESOURCES_DEST_DIR "${Launcher_Name}.app/Contents/Resources")
+-    set(JARS_DEST_DIR "${Launcher_Name}.app/Contents/MacOS/jars")
++    if(HORIZON_FORK)
++        # CMake names the bundle after OUTPUT_NAME, which is the fork binary
++        # name (horizon-prism.app), so the install destinations must follow it.
++        set(Launcher_BUNDLE_DIR "${Launcher_APP_BINARY_NAME}.app")
++    else()
++        set(Launcher_BUNDLE_DIR "${Launcher_Name}.app")
++    endif()
++    set(BINARY_DEST_DIR "${Launcher_BUNDLE_DIR}/Contents/MacOS")
++    set(LIBRARY_DEST_DIR "${Launcher_BUNDLE_DIR}/Contents/MacOS")
++    set(PLUGIN_DEST_DIR "${Launcher_BUNDLE_DIR}/Contents/MacOS")
++    set(FRAMEWORK_DEST_DIR "${Launcher_BUNDLE_DIR}/Contents/Frameworks")
++    set(RESOURCES_DEST_DIR "${Launcher_BUNDLE_DIR}/Contents/Resources")
++    set(JARS_DEST_DIR "${Launcher_BUNDLE_DIR}/Contents/MacOS/jars")
+ 
+     # Mac bundle settings
+     set(MACOSX_BUNDLE_BUNDLE_NAME "${Launcher_DisplayName}")
+@@ -420,6 +447,14 @@ if(UNIX AND APPLE)
+     set(MACOSX_SPARKLE_UPDATE_PUBLIC_KEY "v55ZWWD6QlPoXGV6VLzOTZxZUggWeE51X8cRQyQh6vA=" CACHE STRING "Public key for Sparkle update feed")
+     set(MACOSX_SPARKLE_UPDATE_FEED_URL "https://prismlauncher.org/feed/appcast.xml" CACHE STRING "URL for Sparkle update feed")
+ 
++    if(HORIZON_FORK)
++        # The fork has no Sparkle key yet. Leaving Prism's key and feed would
++        # offer Prism releases and could replace the fork with upstream, so
++        # updates stay off on macOS until the fork publishes its own appcast.
++        set(MACOSX_SPARKLE_UPDATE_PUBLIC_KEY "")
++        set(MACOSX_SPARKLE_UPDATE_FEED_URL "")
++    endif()
++
+     set(MACOSX_SPARKLE_DOWNLOAD_URL "https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-2.9.6.tar.xz" CACHE STRING "URL to Sparkle release archive")
+     set(MACOSX_SPARKLE_SHA256 "52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192" CACHE STRING "SHA256 checksum for Sparkle release archive")
+     set(MACOSX_SPARKLE_DIR "${CMAKE_BINARY_DIR}/frameworks/Sparkle")
+@@ -489,7 +524,7 @@ elseif(UNIX)
+ 
+     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${Launcher_Desktop} DESTINATION ${KDE_INSTALL_APPDIR})
+     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${Launcher_MetaInfo} DESTINATION ${KDE_INSTALL_METAINFODIR})
+-    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/${Launcher_SVG} DESTINATION "${KDE_INSTALL_ICONDIR}/hicolor/scalable/apps")
++    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/${Launcher_SVG} DESTINATION "${KDE_INSTALL_ICONDIR}/hicolor/scalable/apps" RENAME "${Launcher_AppID}.svg")
+     install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/${Launcher_PNG_256} DESTINATION "${KDE_INSTALL_ICONDIR}/hicolor/256x256/apps" RENAME "${Launcher_AppID}.png")
+     install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${Launcher_MIMEInfo} DESTINATION ${KDE_INSTALL_MIMEDIR})
+ 
+diff --git a/program_info/CMakeLists.txt b/program_info/CMakeLists.txt
+index 3afd8a6..d1b195e 100644
+--- a/program_info/CMakeLists.txt
++++ b/program_info/CMakeLists.txt
+@@ -8,22 +8,46 @@ if(UNIX)
+     endif()
+ endif()
+ 
+-set(Launcher_CommonName "PrismLauncher")
+-set(Launcher_DisplayName "Prism Launcher")
+-set(Launcher_AppID "org.prismlauncher.PrismLauncher")
+-set(Launcher_Domain "prismlauncher.org")
+-set(Launcher_Git "https://github.com/PrismLauncher/PrismLauncher")
++if(HORIZON_FORK)
++    # Separate name, bundle id and data folder so the fork and Prism can be
++    # installed side by side. Artwork is still Prism's: only the installed
++    # names change, the input files keep their upstream names.
++    set(Launcher_CommonName "HorizonPrismLauncher")
++    set(Launcher_DisplayName "Horizon Prism Launcher")
++    set(Launcher_AppID "dev.playhorizon.HorizonPrismLauncher")
++    set(Launcher_Domain "playhorizon.dev")
++    set(Launcher_Git "https://github.com/LuBart08/horizon-prism-launcher")
++    set(Launcher_ENVName "HORIZON_PRISM")
++    set(Launcher_Copyright "© 2026 horizon-prism contributors\\n© 2022-2026 Prism Launcher Contributors\\n© 2021-2022 PolyMC Contributors\\n© 2012-2021 MultiMC Contributors")
++    set(Launcher_Copyright_Mac "© 2026 horizon-prism contributors, © 2022-2026 Prism Launcher Contributors, © 2021-2022 PolyMC Contributors and © 2012-2021 MultiMC Contributors")
++
++    set(Launcher_Branding_Base "org.prismlauncher.PrismLauncher")
++    set(Launcher_Binary_Base "prismlauncher")
++    set(Launcher_Branding_Common "PrismLauncher")
++else()
++    set(Launcher_CommonName "PrismLauncher")
++    set(Launcher_DisplayName "Prism Launcher")
++    set(Launcher_AppID "org.prismlauncher.PrismLauncher")
++    set(Launcher_Domain "prismlauncher.org")
++    set(Launcher_Git "https://github.com/PrismLauncher/PrismLauncher")
++    set(Launcher_ENVName "PRISMLAUNCHER")
++    set(Launcher_Copyright "© 2022-2026 Prism Launcher Contributors\\n© 2021-2022 PolyMC Contributors\\n© 2012-2021 MultiMC Contributors")
++    set(Launcher_Copyright_Mac "© 2022-2026 Prism Launcher Contributors, © 2021-2022 PolyMC Contributors and © 2012-2021 MultiMC Contributors")
++
++    set(Launcher_Branding_Base "${Launcher_AppID}")
++    set(Launcher_Binary_Base "${Launcher_APP_BINARY_NAME}")
++    set(Launcher_Branding_Common "${Launcher_CommonName}")
++endif()
+ 
+ set(Launcher_Name "${Launcher_CommonName}" PARENT_SCOPE)
+ set(Launcher_DisplayName "${Launcher_DisplayName}" PARENT_SCOPE)
+-set(Launcher_ENVName "PRISMLAUNCHER" PARENT_SCOPE)
++set(Launcher_ENVName "${Launcher_ENVName}" PARENT_SCOPE)
+ set(Launcher_Domain "${Launcher_Domain}" PARENT_SCOPE)
+ set(Launcher_Git "${Launcher_Git}" PARENT_SCOPE)
+ 
+ set(Launcher_SVGFileName "${Launcher_AppID}.svg")
+-set(Launcher_Copyright "© 2022-2026 Prism Launcher Contributors\\n© 2021-2022 PolyMC Contributors\\n© 2012-2021 MultiMC Contributors")
+-set(Launcher_Copyright_Mac "© 2022-2026 Prism Launcher Contributors, © 2021-2022 PolyMC Contributors and © 2012-2021 MultiMC Contributors" PARENT_SCOPE)
+ set(Launcher_Copyright "${Launcher_Copyright}" PARENT_SCOPE)
++set(Launcher_Copyright_Mac "${Launcher_Copyright_Mac}" PARENT_SCOPE)
+ set(Launcher_UserAgent "${Launcher_CommonName}/${Launcher_VERSION_NAME}" PARENT_SCOPE)
+ set(Launcher_ConfigFile "${Launcher_APP_BINARY_NAME}.cfg" PARENT_SCOPE)
+ set(Launcher_AppID "${Launcher_AppID}" PARENT_SCOPE)
+@@ -32,26 +56,32 @@ set(Launcher_SVGFileName "${Launcher_SVGFileName}" PARENT_SCOPE)
+ set(Launcher_Desktop "program_info/${Launcher_AppID}.desktop" PARENT_SCOPE)
+ set(Launcher_MIMEInfo "program_info/${Launcher_AppID}.xml" PARENT_SCOPE)
+ set(Launcher_MetaInfo "program_info/${Launcher_AppID}.metainfo.xml" PARENT_SCOPE)
+-set(Launcher_PNG_256 "program_info/${Launcher_AppID}_256.png" PARENT_SCOPE)
+-set(Launcher_SVG "program_info/${Launcher_SVGFileName}" PARENT_SCOPE)
+-set(Launcher_Branding_ICNS "program_info/${Launcher_APP_BINARY_NAME}.icns" PARENT_SCOPE)
+-set(Launcher_Branding_MAC_ICON "program_info/${Launcher_CommonName}.icon" PARENT_SCOPE)
++set(Launcher_PNG_256 "program_info/${Launcher_Branding_Base}_256.png" PARENT_SCOPE)
++set(Launcher_SVG "program_info/${Launcher_Branding_Base}.svg" PARENT_SCOPE)
++set(Launcher_Branding_ICNS "program_info/${Launcher_Binary_Base}.icns" PARENT_SCOPE)
++set(Launcher_Branding_MAC_ICON "program_info/${Launcher_Branding_Common}.icon" PARENT_SCOPE)
+ set(Launcher_Branding_ICO "program_info/${Launcher_APP_BINARY_NAME}.ico")
+ set(Launcher_Branding_ICO "${Launcher_Branding_ICO}" PARENT_SCOPE)
+ set(Launcher_Branding_WindowsRC "program_info/${Launcher_APP_BINARY_NAME}.rc" PARENT_SCOPE)
+-set(Launcher_Branding_LogoQRC "program_info/${Launcher_APP_BINARY_NAME}.qrc" PARENT_SCOPE)
+-set(Launcher_Authors "MultiMC & Prism Launcher Contributors")
++# main.cpp calls Q_INIT_RESOURCE(prismlauncher), so the Qt resource keeps its
++# upstream file name even when the binary is renamed.
++set(Launcher_Branding_LogoQRC "program_info/prismlauncher.qrc" PARENT_SCOPE)
++if(HORIZON_FORK)
++    set(Launcher_Authors "horizon-prism contributors & Prism Launcher Contributors")
++else()
++    set(Launcher_Authors "MultiMC & Prism Launcher Contributors")
++endif()
+ 
+ set(Launcher_Portable_File "program_info/portable.txt" PARENT_SCOPE)
+ 
+-configure_file(${Launcher_AppID}.desktop.in ${Launcher_AppID}.desktop)
+-configure_file(${Launcher_AppID}.metainfo.xml.in ${Launcher_AppID}.metainfo.xml)
+-configure_file(${Launcher_APP_BINARY_NAME}.rc.in ${Launcher_APP_BINARY_NAME}.rc @ONLY)
+-configure_file(${Launcher_APP_BINARY_NAME}.qrc.in ${Launcher_APP_BINARY_NAME}.qrc @ONLY)
+-configure_file(${Launcher_APP_BINARY_NAME}.manifest.in ${Launcher_APP_BINARY_NAME}.manifest @ONLY)
+-configure_file(${Launcher_APP_BINARY_NAME}.ico ${Launcher_APP_BINARY_NAME}.ico COPYONLY)
+-configure_file(${Launcher_SVGFileName} ${Launcher_SVGFileName} COPYONLY)
+-configure_file(${Launcher_AppID}.mime.xml ${Launcher_AppID}.xml COPYONLY)
++configure_file(${Launcher_Branding_Base}.desktop.in ${Launcher_AppID}.desktop)
++configure_file(${Launcher_Branding_Base}.metainfo.xml.in ${Launcher_AppID}.metainfo.xml)
++configure_file(${Launcher_Binary_Base}.rc.in ${Launcher_APP_BINARY_NAME}.rc @ONLY)
++configure_file(${Launcher_Binary_Base}.qrc.in prismlauncher.qrc @ONLY)
++configure_file(${Launcher_Binary_Base}.manifest.in ${Launcher_APP_BINARY_NAME}.manifest @ONLY)
++configure_file(${Launcher_Binary_Base}.ico ${Launcher_APP_BINARY_NAME}.ico COPYONLY)
++configure_file(${Launcher_Branding_Base}.svg ${Launcher_SVGFileName} COPYONLY)
++configure_file(${Launcher_Branding_Base}.mime.xml ${Launcher_AppID}.xml COPYONLY)
+ 
+ if(MSVC)
+     set(Launcher_MSVC_Redist_NSIS_Section [=[
+@@ -80,7 +110,7 @@ endif()
+ configure_file(win_install.nsi.in win_install.nsi @ONLY)
+ 
+ if(SCDOC_FOUND)
+-    configure_file(${Launcher_APP_BINARY_NAME}.6.scd.in ${Launcher_APP_BINARY_NAME}.6.scd @ONLY)
++    configure_file(${Launcher_Binary_Base}.6.scd.in ${Launcher_APP_BINARY_NAME}.6.scd @ONLY)
+ 
+     set(in_scd "${CMAKE_CURRENT_BINARY_DIR}/${Launcher_APP_BINARY_NAME}.6.scd")
+     set(out_man "${CMAKE_CURRENT_BINARY_DIR}/${Launcher_APP_BINARY_NAME}.6")
+-- 
+2.50.1 (Apple Git-155)
+

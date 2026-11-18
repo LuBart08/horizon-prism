@@ -8,13 +8,24 @@
 #   - pkg-config:               built from pkgconf sources into ~/.local
 #   - vcpkg dependencies:       cmake/vcpkg/vcpkg install (manifest mode)
 #
-# Override QT_DIR or BUILD_DIR to change the defaults.
+# Override QT_DIR, BUILD_DIR, HORIZON_FORK (ON for M6 branding), BUILD_TESTING
+# or TARGET to change the defaults.
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PRISM="$ROOT/PrismLauncher"
 QT_DIR=${QT_DIR:-"$HOME/Qt/6.8.3/macos"}
 BUILD_DIR=${BUILD_DIR:-"$ROOT/build-horizon"}
+HORIZON_FORK=${HORIZON_FORK:-OFF}
+BUILD_TESTING=${BUILD_TESTING:-OFF}
+if [ "$HORIZON_FORK" = "ON" ]; then
+    APP_NAME=HorizonPrismLauncher
+    BINARY_NAME=horizon-prism
+else
+    APP_NAME=PrismLauncher
+    BINARY_NAME=prismlauncher
+fi
+TARGET=${TARGET:-"$APP_NAME"}
 
 if [ ! -d "$PRISM" ]; then
     echo "error: $PRISM not found; clone the fork there first" >&2
@@ -58,9 +69,10 @@ cmake -S "$PRISM" -B "$BUILD_DIR" -G Ninja \
     -DCMAKE_TOOLCHAIN_FILE="$PRISM/cmake/vcpkg/scripts/buildsystems/vcpkg.cmake" \
     -DVCPKG_TARGET_TRIPLET=x64-osx \
     -DENABLE_LTO=OFF \
-    -DBUILD_TESTING=OFF
+    -DHORIZON_FORK="$HORIZON_FORK" \
+    -DBUILD_TESTING="$BUILD_TESTING"
 
-cmake --build "$BUILD_DIR" --target PrismLauncher -j "$(sysctl -n hw.ncpu)"
+cmake --build "$BUILD_DIR" --target "$TARGET" -j "$(sysctl -n hw.ncpu)"
 
 echo
-echo "Built: $BUILD_DIR/prismlauncher.app"
+echo "Built: $BUILD_DIR/$APP_NAME.app (binary: $BINARY_NAME)"

@@ -227,16 +227,36 @@ Critère : ajouter/retirer un `.hmod`, relancer, voir le contenu actif.
 
 Détails : [`fork/M5.md`](../fork/M5.md).
 
-### M6 — packaging
+### M6 — packaging ✅ (compilé et testé sur macOS)
 
 Objectif : un produit distribuable.
 
-- Renommer (binaire, bundle id, dossier de données) pour éviter tout conflit
-  avec Prism.
-- Repointer l'updater (`launcher/updater/`) vers les releases du fork.
-- Nouvelles clés de signature macOS/Windows.
-- Licence **GPL-3.0** conservée, sources publiées, avis de fork visible.
-- CI : build macOS/Windows/Linux + tests du sidecar.
+Implémenté sur la branche `horizon/m6` :
+
+- option CMake `HORIZON_FORK=ON` :
+  - binaire `horizon-prism`, app `horizon-prism.app` ;
+  - bundle id `dev.playhorizon.HorizonPrismLauncher` ;
+  - nom interne `HorizonPrismLauncher` → dossier de données séparé
+    (`~/Library/Application Support/HorizonPrismLauncher`) et variable
+    d'environnement `HORIZONPRISMLAUNCHER_DATA_DIR` ;
+  - updater GitHub pointé vers `LuBart08/horizon-prism-launcher` sur
+    Windows/Linux ; Sparkle désactivé sur macOS (pas de clé de fork, et
+    laisser celle de Prism remplacerait le fork par Prism) ;
+- `program_info/CMakeLists.txt` : les noms installés changent, les fichiers
+  d'art Prism restent les entrées (pas de nouvelle icône) ;
+- `fork/build-m6.sh` : configure + compile + tests avec le branding fork ;
+- `.github/workflows/horizon.yml` : build + tests macOS/Linux/Windows,
+  artefact macOS non signé ;
+- licence GPL-3.0 conservée, `HORIZON.md` et l'à-propos mentionnent le fork.
+
+Écarts assumés : pas de clé Sparkle, pas de certificat Apple/Windows, donc
+artefacts non signés et pas de mise à jour macOS. Les étapes de signature
+sont documentées dans [`fork/M6.md`](../fork/M6.md) ; les secrets restent à
+fournir.
+
+Critère : un produit distribuable.
+
+Détails : [`fork/M6.md`](../fork/M6.md).
 
 ## 3. Carte des fichiers Prism à toucher
 
