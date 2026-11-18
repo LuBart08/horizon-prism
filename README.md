@@ -25,6 +25,7 @@ instance Prism  ──►  horizon-prepare  ──►  horizon-client
 | M4 | préparation/repair automatique, progression | ✅ compilé et testé |
 | M5 | contenu Horizon (`.hmod`/`.hnmod`), `horizon-mods.txt` | ✅ compilé et testé |
 | M6 | packaging, updater, signature, CI | ✅ compilé et testé (macOS) |
+| M7 | gestion des versions Horizon (installer, mettre à jour, supprimer) | ✅ compilé et testé |
 
 ## M0 : ce qui est prouvé, pour de vrai
 
@@ -197,10 +198,10 @@ mapping du crash, refus 26.2, session manquante, `--dry-run`, `--json` propre,
 
 ## Suite
 
-Le plan du fork (M1–M6), l'architecture retenue et la carte des fichiers Prism
+Le plan du fork (M1–M7), l'architecture retenue et la carte des fichiers Prism
 à toucher sont dans [`docs/fork-plan.md`](docs/fork-plan.md).
 
-## Fork Prism (M1, M2, M3, M4, M5, M6)
+## Fork Prism (M1, M2, M3, M4, M5, M6, M7)
 
 Le fork vit dans [`fork/`](fork/) :
 
@@ -216,12 +217,14 @@ Le fork vit dans [`fork/`](fork/) :
   activation via `horizon-mods.txt`, ajout/retrait de fichiers ;
 - [`fork/M6.md`](fork/M6.md) : branding séparé (`HORIZON_FORK=ON`), updater
   du fork, signature et CI ;
+- [`fork/M7.md`](fork/M7.md) : gestion des versions Horizon via
+  `horizon-launcher` (liste, installation, suppression, mises à jour) ;
 - [`fork/patches/`](fork/patches/) : les commits à appliquer sur
   `PrismLauncher/develop` ;
 - [`fork/build-m1.sh`](fork/build-m1.sh) : configure + compile (Qt via `aqt`,
   dépendances via vcpkg) ;
 - [`fork/build-m6.sh`](fork/build-m6.sh) : même chose avec le branding fork
-  (`HorizonPrismLauncher.app`, binaire `horizon-prism`) ;
+  (`horizon-prism.app`, binaire `horizon-prism`) ;
 - [`fork/make-test-instance.sh`](fork/make-test-instance.sh) : instance
   `HorizonTest` jetable ;
 - un stub `AGL.framework` vide, généré par `build-m1.sh` dans `fork/stubs/`
@@ -229,8 +232,8 @@ Le fork vit dans [`fork/`](fork/) :
 
 Le fork Prism est publié sur
 **[github.com/LuBart08/horizon-prism-launcher](https://github.com/LuBart08/horizon-prism-launcher)**
-(branche par défaut `horizon/latest`, qui contient M1 + M3 + M4 + M2 + M5 + M6).
-Les branches `horizon/m1` à `horizon/m6` gardent chaque jalon séparé.
+(branche par défaut `horizon/latest`, qui contient M1 + M3 + M4 + M2 + M5 + M6 + M7).
+Les branches `horizon/m1` à `horizon/m7` gardent chaque jalon séparé.
 
 Le clone complet de Prism (`fork/PrismLauncher/`) n'est **pas** versionné ici :
 il a son propre dépôt GitHub et suit `PrismLauncher/develop`.

@@ -1,0 +1,1126 @@
+From 739387db3784e3ce90e70e05654071ffc10c84f9 Mon Sep 17 00:00:00 2001
+From: horizon-prism <horizon-prism@localhost>
+Date: Wed, 18 Nov 2026 11:24:22 +0100
+Subject: [PATCH] feat: manage Horizon versions (M7)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- HorizonRelease parses what `horizon-launcher` prints with --json:
+  versions (tag, name, date, prerelease, available_here, installed),
+  versions --installed (installed, selected), update --check (horizon,
+  launcher, launcher_current) and install (installed, prepared);
+- HorizonInstance::launcherCli() finds the official CLI through
+  launcherPath in horizon.json, Horizon.app on macOS, or PATH;
+- HorizonVersionsDialog lists installed and available versions, refreshes
+  on demand, installs, removes, checks for updates and hands a version to
+  the settings page; it never touches the network on open, never removes
+  a version Horizon or an instance plays, and never updates the launcher
+  itself;
+- HorizonSettingsPage gains a "Manage Horizon versions…" button; the
+  chosen version fills the page's combos so apply() stays the only writer;
+- HorizonRelease_test covers the four answers and their error cases
+  (14 tests).
+
+The CLI reports errors with exit code 1 and `error:` on stderr, and only
+prints install progress when stderr is a terminal, so the dialog uses an
+indeterminate bar and the exit code.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+---
+ launcher/CMakeLists.txt                       |   4 +
+ launcher/minecraft/HorizonInstance.cpp        |  31 ++
+ launcher/minecraft/HorizonInstance.h          |   5 +
+ launcher/minecraft/HorizonRelease.cpp         | 156 +++++++
+ launcher/minecraft/HorizonRelease.h           |  83 ++++
+ launcher/ui/dialogs/HorizonVersionsDialog.cpp | 383 ++++++++++++++++++
+ launcher/ui/dialogs/HorizonVersionsDialog.h   |  83 ++++
+ .../ui/pages/instance/HorizonSettingsPage.cpp |  24 ++
+ .../ui/pages/instance/HorizonSettingsPage.h   |   4 +
+ tests/CMakeLists.txt                          |   1 +
+ tests/HorizonRelease_test.cpp                 | 173 ++++++++
+ 11 files changed, 947 insertions(+)
+ create mode 100644 launcher/minecraft/HorizonRelease.cpp
+ create mode 100644 launcher/minecraft/HorizonRelease.h
+ create mode 100644 launcher/ui/dialogs/HorizonVersionsDialog.cpp
+ create mode 100644 launcher/ui/dialogs/HorizonVersionsDialog.h
+ create mode 100644 tests/HorizonRelease_test.cpp
+
+diff --git a/launcher/CMakeLists.txt b/launcher/CMakeLists.txt
+index 6d521e2..8e040c2 100644
+--- a/launcher/CMakeLists.txt
++++ b/launcher/CMakeLists.txt
+@@ -279,6 +279,8 @@ set(MINECRAFT_SOURCES
+     minecraft/MinecraftInstance.h
+     minecraft/HorizonInstance.cpp
+     minecraft/HorizonInstance.h
++    minecraft/HorizonRelease.cpp
++    minecraft/HorizonRelease.h
+     minecraft/LaunchProfile.cpp
+     minecraft/LaunchProfile.h
+     minecraft/Component.cpp
+@@ -1043,6 +1045,8 @@ SET(LAUNCHER_SOURCES
+     # GUI - dialogs
+     ui/dialogs/AboutDialog.cpp
+     ui/dialogs/AboutDialog.h
++    ui/dialogs/HorizonVersionsDialog.cpp
++    ui/dialogs/HorizonVersionsDialog.h
+     ui/dialogs/ProfileSelectDialog.cpp
+     ui/dialogs/ProfileSelectDialog.h
+     ui/dialogs/ProfileSetupDialog.cpp
+diff --git a/launcher/minecraft/HorizonInstance.cpp b/launcher/minecraft/HorizonInstance.cpp
+index 43de4d8..e9fbff6 100644
+--- a/launcher/minecraft/HorizonInstance.cpp
++++ b/launcher/minecraft/HorizonInstance.cpp
+@@ -295,6 +295,37 @@ QString HorizonInstance::preparerBinary() const
+     return horizonBinary(QStringLiteral("preparerPath"), QStringLiteral("preparerVersion"), "horizon-prepare");
+ }
+ 
++QString HorizonInstance::launcherCli() const
++{
++#ifdef Q_OS_WIN
++    const auto executableName = QStringLiteral("horizon-launcher.exe");
++#else
++    const auto executableName = QStringLiteral("horizon-launcher");
++#endif
++
++    // Explicit override in horizon.json, absolute or relative to the instance.
++    const auto configured = m_horizon.value("launcherPath").toString();
++    if (!configured.isEmpty()) {
++        const QFileInfo info(configured);
++        const auto candidate = info.isAbsolute() ? configured : FS::PathCombine(instanceRoot(), configured);
++        if (QFileInfo(candidate).isFile())
++            return candidate;
++    }
++
++#if defined(Q_OS_MACOS)
++    // The app bundle the player installed; the CLI lives beside the window app.
++    const QStringList bundles{ FS::PathCombine(QDir::homePath(), "Applications", "Horizon.app"),
++                               QStringLiteral("/Applications/Horizon.app") };
++    for (const auto& bundle : bundles) {
++        const auto candidate = FS::PathCombine(bundle, "Contents", "MacOS", executableName);
++        if (QFileInfo(candidate).isFile())
++            return candidate;
++    }
++#endif
++
++    return QStandardPaths::findExecutable(executableName);
++}
++
+ QString HorizonInstance::instanceConfigFolder() const
+ {
+     return FS::PathCombine(instanceRoot(), "horizon", "config");
+diff --git a/launcher/minecraft/HorizonInstance.h b/launcher/minecraft/HorizonInstance.h
+index c7aaf13..bafa4c5 100644
+--- a/launcher/minecraft/HorizonInstance.h
++++ b/launcher/minecraft/HorizonInstance.h
+@@ -91,6 +91,11 @@ class HorizonInstance : public MinecraftInstance {
+     /// with `preparerPath` / `preparerVersion`).
+     QString preparerBinary() const;
+ 
++    /// `horizon-launcher`, the official CLI that installs, updates and removes
++    /// versions (M7). It is not shipped inside version folders: it comes from
++    /// `launcherPath` in horizon.json, Horizon.app on macOS, or PATH.
++    QString launcherCli() const;
++
+    private:
+     void loadHorizonJson();
+     void saveHorizonJson();
+diff --git a/launcher/minecraft/HorizonRelease.cpp b/launcher/minecraft/HorizonRelease.cpp
+new file mode 100644
+index 0000000..e4dccb3
+--- /dev/null
++++ b/launcher/minecraft/HorizonRelease.cpp
+@@ -0,0 +1,156 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#include "HorizonRelease.h"
++
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
++#include <QJsonParseError>
++#include <QJsonValue>
++
++namespace {
++/// Parses `json` and reports why when it is not what the CLI promised.
++QJsonDocument parseDocument(const QByteArray& json, const QString& expected, QString* error)
++{
++    QJsonParseError parseError{};
++    const auto document = QJsonDocument::fromJson(json, &parseError);
++    if (parseError.error != QJsonParseError::NoError) {
++        if (error != nullptr)
++            *error = QStringLiteral("horizon-launcher %1: %2").arg(expected, parseError.errorString());
++        return {};
++    }
++    return document;
++}
++
++void fail(const QString& expected, const QString& why, QString* error)
++{
++    if (error != nullptr)
++        *error = QStringLiteral("horizon-launcher %1: %2").arg(expected, why);
++}
++
++QString stringOrEmpty(const QJsonValue& value)
++{
++    return value.isString() ? value.toString() : QString();
++}
++}  // namespace
++
++QList<HorizonRelease> HorizonRelease::listFromJson(const QByteArray& json, QString* error)
++{
++    if (error != nullptr)
++        error->clear();
++
++    const auto document = parseDocument(json, QStringLiteral("versions --json"), error);
++    if (document.isNull())
++        return {};
++    if (!document.isArray()) {
++        fail(QStringLiteral("versions --json"), QStringLiteral("expected a list of releases"), error);
++        return {};
++    }
++
++    QList<HorizonRelease> releases;
++    const auto array = document.array();
++    releases.reserve(array.size());
++    for (const auto& value : array) {
++        if (!value.isObject())
++            continue;
++        const auto object = value.toObject();
++        const auto tag = object.value("tag").toString();
++        if (tag.isEmpty())
++            continue;
++
++        HorizonRelease release;
++        release.tag = tag;
++        release.name = object.value("name").toString();
++        release.date = object.value("date").toString();
++        release.prerelease = object.value("prerelease").toBool();
++        release.availableHere = object.value("available_here").toBool();
++        release.installed = object.value("installed").toBool();
++        releases << release;
++    }
++    return releases;
++}
++
++HorizonInstalledVersions HorizonInstalledVersions::fromJson(const QByteArray& json, QString* error)
++{
++    if (error != nullptr)
++        error->clear();
++
++    const auto document = parseDocument(json, QStringLiteral("versions --installed --json"), error);
++    if (document.isNull())
++        return {};
++    if (!document.isObject()) {
++        fail(QStringLiteral("versions --installed --json"), QStringLiteral("expected an object"), error);
++        return {};
++    }
++
++    HorizonInstalledVersions versions;
++    const auto object = document.object();
++    for (const auto& value : object.value("installed").toArray()) {
++        const auto tag = value.toString();
++        if (!tag.isEmpty())
++            versions.installed << tag;
++    }
++    // `selected` is null when nothing is selected.
++    versions.selected = stringOrEmpty(object.value("selected"));
++    return versions;
++}
++
++HorizonUpdates HorizonUpdates::fromJson(const QByteArray& json, QString* error)
++{
++    if (error != nullptr)
++        error->clear();
++
++    const auto document = parseDocument(json, QStringLiteral("update --check --json"), error);
++    if (document.isNull())
++        return {};
++    if (!document.isObject()) {
++        fail(QStringLiteral("update --check --json"), QStringLiteral("expected an object"), error);
++        return {};
++    }
++
++    HorizonUpdates updates;
++    const auto object = document.object();
++    // `horizon` is a tag or null; `launcher` is a version or null.
++    updates.horizonTag = stringOrEmpty(object.value("horizon"));
++    updates.launcherVersion = stringOrEmpty(object.value("launcher"));
++    updates.launcherCurrent = stringOrEmpty(object.value("launcher_current"));
++    return updates;
++}
++
++HorizonInstallResult HorizonInstallResult::fromJson(const QByteArray& json, QString* error)
++{
++    if (error != nullptr)
++        error->clear();
++
++    const auto document = parseDocument(json, QStringLiteral("install --json"), error);
++    if (document.isNull())
++        return {};
++    if (!document.isObject()) {
++        fail(QStringLiteral("install --json"), QStringLiteral("expected an object"), error);
++        return {};
++    }
++
++    HorizonInstallResult result;
++    const auto object = document.object();
++    result.installed = object.value("installed").toString();
++    result.prepared = object.value("prepared").toBool();
++    if (result.installed.isEmpty())
++        fail(QStringLiteral("install --json"), QStringLiteral("no installed version in the answer"), error);
++    return result;
++}
+diff --git a/launcher/minecraft/HorizonRelease.h b/launcher/minecraft/HorizonRelease.h
+new file mode 100644
+index 0000000..984b9e1
+--- /dev/null
++++ b/launcher/minecraft/HorizonRelease.h
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include <QByteArray>
++#include <QList>
++#include <QString>
++#include <QStringList>
++
++/*!
++ * The version model of the official Horizon launcher (milestone M7).
++ *
++ * Everything here parses the JSON the `horizon-launcher` CLI prints with
++ * `--json`; no network and no file access, so it is unit-testable:
++ *
++ *   horizon-launcher versions --json
++ *   horizon-launcher versions --installed --json
++ *   horizon-launcher update --check --json
++ *   horizon-launcher install <tag> --json
++ */
++
++/// One entry of `horizon-launcher versions --json`.
++struct HorizonRelease {
++    QString tag;
++    QString name;
++    QString date;
++    bool prerelease = false;
++    /// A build exists for this platform, so it can be installed here.
++    bool availableHere = false;
++    bool installed = false;
++
++    /// `nullptr` on success; otherwise a message for the user.
++    static QList<HorizonRelease> listFromJson(const QByteArray& json, QString* error = nullptr);
++};
++
++/// `horizon-launcher versions --installed --json`.
++struct HorizonInstalledVersions {
++    QStringList installed;
++    /// The version the official launcher plays by default; empty when none is set.
++    QString selected;
++
++    static HorizonInstalledVersions fromJson(const QByteArray& json, QString* error = nullptr);
++};
++
++/// `horizon-launcher update --check --json`.
++struct HorizonUpdates {
++    /// Tag of the newer Horizon release; empty when Horizon is up to date.
++    QString horizonTag;
++    /// Version of the newer launcher; empty when the launcher is up to date.
++    QString launcherVersion;
++    /// Version of the launcher that answered.
++    QString launcherCurrent;
++
++    bool hasHorizonUpdate() const { return !horizonTag.isEmpty(); }
++    bool hasLauncherUpdate() const { return !launcherVersion.isEmpty(); }
++
++    static HorizonUpdates fromJson(const QByteArray& json, QString* error = nullptr);
++};
++
++/// `horizon-launcher install <tag> --json`.
++struct HorizonInstallResult {
++    QString installed;
++    /// The installed version already had prepared resources, so no prepare is needed.
++    bool prepared = false;
++
++    static HorizonInstallResult fromJson(const QByteArray& json, QString* error = nullptr);
++};
+diff --git a/launcher/ui/dialogs/HorizonVersionsDialog.cpp b/launcher/ui/dialogs/HorizonVersionsDialog.cpp
+new file mode 100644
+index 0000000..7768880
+--- /dev/null
++++ b/launcher/ui/dialogs/HorizonVersionsDialog.cpp
+@@ -0,0 +1,383 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#include "HorizonVersionsDialog.h"
++
++#include <QDialogButtonBox>
++#include <QHBoxLayout>
++#include <QHeaderView>
++#include <QMessageBox>
++#include <QProcess>
++#include <QProgressBar>
++#include <QPushButton>
++#include <QTableWidget>
++#include <QTableWidgetItem>
++#include <QVBoxLayout>
++
++#include <algorithm>
++
++#include "minecraft/HorizonInstance.h"
++
++namespace {
++constexpr int TAG_ROLE = Qt::UserRole;
++
++QString errorText(const QByteArray& stderrText, const QByteArray& stdoutText)
++{
++    auto text = QString::fromUtf8(stderrText).trimmed();
++    if (text.isEmpty())
++        text = QString::fromUtf8(stdoutText).trimmed();
++    if (text.size() > 2000)
++        text = text.right(2000).prepend(QStringLiteral("…\n"));
++    return text;
++}
++}  // namespace
++
++HorizonVersionsDialog::HorizonVersionsDialog(HorizonInstance* instance, QWidget* parent)
++    : QDialog(parent), m_instance(instance)
++{
++    setWindowTitle(tr("Horizon versions"));
++    resize(720, 420);
++
++    auto* layout = new QVBoxLayout(this);
++
++    m_table = new QTableWidget(this);
++    m_table->setColumnCount(3);
++    m_table->setHorizontalHeaderLabels({ tr("Version"), tr("Date"), tr("State") });
++    m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
++    m_table->setSelectionMode(QAbstractItemView::SingleSelection);
++    m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
++    m_table->verticalHeader()->setVisible(false);
++    m_table->horizontalHeader()->setStretchLastSection(true);
++    layout->addWidget(m_table, 1);
++
++    m_status = new QLabel(this);
++    m_status->setWordWrap(true);
++    m_status->setTextInteractionFlags(Qt::TextSelectableByMouse);
++    layout->addWidget(m_status);
++
++    m_progress = new QProgressBar(this);
++    m_progress->setRange(0, 0);
++    m_progress->setVisible(false);
++    layout->addWidget(m_progress);
++
++    auto* buttons = new QHBoxLayout();
++    m_refresh = new QPushButton(tr("Refresh"), this);
++    m_checkUpdates = new QPushButton(tr("Check for updates"), this);
++    m_install = new QPushButton(tr("Install"), this);
++    m_remove = new QPushButton(tr("Remove"), this);
++    m_use = new QPushButton(tr("Use for this instance"), this);
++    buttons->addWidget(m_refresh);
++    buttons->addWidget(m_checkUpdates);
++    buttons->addStretch(1);
++    buttons->addWidget(m_install);
++    buttons->addWidget(m_remove);
++    buttons->addWidget(m_use);
++    layout->addLayout(buttons);
++
++    auto* close = new QDialogButtonBox(QDialogButtonBox::Close, this);
++    connect(close, &QDialogButtonBox::rejected, this, &QDialog::reject);
++    layout->addWidget(close);
++
++    connect(m_table, &QTableWidget::itemSelectionChanged, this, &HorizonVersionsDialog::updateButtons);
++    connect(m_refresh, &QPushButton::clicked, this, &HorizonVersionsDialog::refresh);
++    connect(m_checkUpdates, &QPushButton::clicked, this, &HorizonVersionsDialog::checkForUpdates);
++    connect(m_install, &QPushButton::clicked, this, &HorizonVersionsDialog::installSelected);
++    connect(m_remove, &QPushButton::clicked, this, &HorizonVersionsDialog::removeSelected);
++    connect(m_use, &QPushButton::clicked, this, &HorizonVersionsDialog::useForInstance);
++
++    // Offline first: what is on disk is enough to pick a version.
++    m_installed.installed = m_instance->installedVersions();
++    populate();
++
++    if (m_instance->launcherCli().isEmpty()) {
++        m_status->setText(tr("The Horizon launcher was not found, so installing and removing versions is unavailable. "
++                             "Install Horizon, put horizon-launcher in PATH, or set \"launcherPath\" in horizon.json."));
++    } else {
++        m_status->setText(tr("Versions installed on this computer. Refresh lists the releases Horizon can install."));
++    }
++    updateButtons();
++}
++
++void HorizonVersionsDialog::populate()
++{
++    m_table->setRowCount(0);
++
++    struct Row {
++        QString tag;
++        QString date;
++        bool installed;
++        bool available;
++        bool prerelease;
++    };
++    QList<Row> rows;
++
++    if (m_releases.isEmpty()) {
++        for (const auto& tag : m_installed.installed)
++            rows << Row{ tag, QString(), true, true, false };
++    } else {
++        for (const auto& release : m_releases)
++            rows << Row{ release.tag, release.date, release.installed, release.availableHere, release.prerelease };
++    }
++
++    for (const auto& row : rows) {
++        const int index = m_table->rowCount();
++        m_table->insertRow(index);
++
++        auto* tagItem = new QTableWidgetItem(row.tag);
++        tagItem->setData(TAG_ROLE, row.tag);
++        m_table->setItem(index, 0, tagItem);
++        m_table->setItem(index, 1, new QTableWidgetItem(row.date));
++
++        QStringList state;
++        if (row.installed)
++            state << tr("installed");
++        else if (!row.available)
++            state << tr("no build for this platform");
++        else
++            state << tr("available");
++        if (row.prerelease)
++            state << tr("prerelease");
++        if (row.tag == m_installed.selected)
++            state << tr("Horizon's default");
++        if (row.tag == m_instance->clientVersion() || row.tag == m_instance->preparerVersion())
++            state << tr("used by this instance");
++        m_table->setItem(index, 2, new QTableWidgetItem(state.join(QStringLiteral(", "))));
++    }
++
++    m_table->resizeColumnToContents(0);
++    m_table->resizeColumnToContents(1);
++}
++
++QString HorizonVersionsDialog::selectedTag() const
++{
++    const auto rows = m_table->selectionModel() ? m_table->selectionModel()->selectedRows() : QModelIndexList();
++    if (rows.isEmpty())
++        return {};
++    const auto* item = m_table->item(rows.first().row(), 0);
++    return item ? item->data(TAG_ROLE).toString() : QString();
++}
++
++bool HorizonVersionsDialog::isInUse(const QString& tag) const
++{
++    if (tag.isEmpty())
++        return false;
++    return tag == m_installed.selected || tag == m_instance->clientVersion() || tag == m_instance->preparerVersion();
++}
++
++void HorizonVersionsDialog::updateButtons()
++{
++    const auto tag = selectedTag();
++    const bool hasCli = !m_instance->launcherCli().isEmpty();
++    const bool installed = m_installed.installed.contains(tag) || std::any_of(m_releases.cbegin(), m_releases.cend(), [&tag](const HorizonRelease& r) { return r.tag == tag && r.installed; });
++    const bool available = m_releases.isEmpty() || std::any_of(m_releases.cbegin(), m_releases.cend(), [&tag](const HorizonRelease& r) { return r.tag == tag && r.availableHere; });
++
++    m_refresh->setEnabled(hasCli && !m_busy);
++    m_checkUpdates->setEnabled(hasCli && !m_busy);
++    m_install->setEnabled(hasCli && !m_busy && !tag.isEmpty() && !installed && available);
++    m_remove->setEnabled(hasCli && !m_busy && !tag.isEmpty() && installed && !isInUse(tag));
++    m_use->setEnabled(!m_busy && !tag.isEmpty() && installed);
++}
++
++void HorizonVersionsDialog::setBusy(bool busy, const QString& what)
++{
++    m_busy = busy;
++    m_progress->setVisible(busy);
++    if (busy)
++        m_status->setText(what);
++    updateButtons();
++    m_table->setEnabled(!busy);
++}
++
++void HorizonVersionsDialog::runCli(const QStringList& args,
++                                   const QString& what,
++                                   const std::function<void(int, const QByteArray&, const QByteArray&)>& done)
++{
++    const auto cli = m_instance->launcherCli();
++    if (cli.isEmpty()) {
++        showFailure(what, QByteArrayLiteral("horizon-launcher was not found"));
++        return;
++    }
++
++    setBusy(true, what);
++
++    auto* process = new QProcess(this);
++    process->setProgram(cli);
++    process->setArguments(args);
++    process->setProcessChannelMode(QProcess::SeparateChannels);
++
++    connect(process, &QProcess::errorOccurred, this, [this, process, done](QProcess::ProcessError error) {
++        if (error != QProcess::FailedToStart)
++            return;
++        const auto text = tr("horizon-launcher failed to start: %1").arg(process->errorString());
++        setBusy(false, QString());
++        process->deleteLater();
++        done(-1, {}, text.toUtf8());
++    });
++
++    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
++            [this, process, what, done](int exitCode, QProcess::ExitStatus status) {
++                const auto out = process->readAllStandardOutput();
++                const auto err = process->readAllStandardError();
++                process->deleteLater();
++                setBusy(false, QString());
++                if (status == QProcess::CrashExit) {
++                    done(-1, out, err);
++                    return;
++                }
++                if (exitCode != 0) {
++                    showFailure(what, errorText(err, out).toUtf8());
++                    done(exitCode, out, err);
++                    return;
++                }
++                done(exitCode, out, err);
++            });
++
++    process->start();
++}
++
++void HorizonVersionsDialog::showFailure(const QString& what, const QByteArray& stderrText)
++{
++    m_status->setText(tr("%1 failed.").arg(what));
++    QMessageBox::warning(this, tr("Horizon versions"), tr("%1 failed:\n\n%2").arg(what, QString::fromUtf8(stderrText).trimmed()));
++}
++
++void HorizonVersionsDialog::refresh()
++{
++    runCli({ "versions", "--json" }, tr("Listing releases"), [this](int exitCode, const QByteArray& out, const QByteArray&) {
++        if (exitCode != 0)
++            return;
++        QString error;
++        const auto releases = HorizonRelease::listFromJson(out, &error);
++        if (!error.isEmpty()) {
++            showFailure(tr("Reading the release list"), error.toUtf8());
++            return;
++        }
++        m_releases = releases;
++        populate();
++        updateButtons();
++        m_status->setText(tr("%n release(s) listed.", "", m_releases.size()));
++
++        runCli({ "versions", "--installed", "--json" }, tr("Listing installed versions"),
++                [this](int exitCode, const QByteArray& out, const QByteArray&) {
++                    if (exitCode != 0)
++                        return;
++                    QString error;
++                    const auto installed = HorizonInstalledVersions::fromJson(out, &error);
++                    if (!error.isEmpty()) {
++                        showFailure(tr("Reading the installed versions"), error.toUtf8());
++                        return;
++                    }
++                    m_installed = installed;
++                    populate();
++                    updateButtons();
++                });
++    });
++}
++
++void HorizonVersionsDialog::checkForUpdates()
++{
++    runCli({ "update", "--check", "--json" }, tr("Checking for updates"), [this](int exitCode, const QByteArray& out, const QByteArray&) {
++        if (exitCode != 0)
++            return;
++        QString error;
++        const auto updates = HorizonUpdates::fromJson(out, &error);
++        if (!error.isEmpty()) {
++            showFailure(tr("Checking for updates"), error.toUtf8());
++            return;
++        }
++        m_updates = updates;
++
++        QStringList lines;
++        lines << (updates.hasHorizonUpdate() ? tr("Horizon %1 is available.").arg(updates.horizonTag) : tr("Horizon is up to date."));
++        if (updates.hasLauncherUpdate())
++            lines << tr("A newer Horizon launcher (%1) is available; this is %2. Update it from Horizon itself.")
++                             .arg(updates.launcherVersion, updates.launcherCurrent);
++        else if (!updates.launcherCurrent.isEmpty())
++            lines << tr("The Horizon launcher is up to date (%1).").arg(updates.launcherCurrent);
++        m_status->setText(lines.join(' '));
++    });
++}
++
++void HorizonVersionsDialog::installSelected()
++{
++    const auto tag = selectedTag();
++    if (tag.isEmpty())
++        return;
++
++    if (m_releases.isEmpty()) {
++        // Without the release list we cannot tell whether a build exists here.
++        refresh();
++        return;
++    }
++
++    runCli({ "install", tag, "--json" }, tr("Installing %1").arg(tag), [this, tag](int exitCode, const QByteArray& out, const QByteArray&) {
++        if (exitCode != 0)
++            return;
++        QString error;
++        const auto result = HorizonInstallResult::fromJson(out, &error);
++        if (!error.isEmpty()) {
++            showFailure(tr("Installing %1").arg(tag), error.toUtf8());
++            return;
++        }
++        m_installed.installed = m_instance->installedVersions();
++        if (!m_installed.installed.contains(result.installed))
++            m_installed.installed << result.installed;
++        populate();
++        updateButtons();
++        m_status->setText(result.prepared ? tr("Installed %1. It already has prepared resources.").arg(result.installed)
++                                          : tr("Installed %1. Prepare it before the first launch.").arg(result.installed));
++    });
++}
++
++void HorizonVersionsDialog::removeSelected()
++{
++    const auto tag = selectedTag();
++    if (tag.isEmpty() || isInUse(tag))
++        return;
++
++    const auto answer = QMessageBox::question(this, tr("Horizon versions"),
++                                              tr("Remove Horizon %1 from this computer?\n\n"
++                                                 "Its files are deleted. Instances pinned to it will need another version.")
++                                                  .arg(tag),
++                                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
++    if (answer != QMessageBox::Yes)
++        return;
++
++    runCli({ "remove", tag }, tr("Removing %1").arg(tag), [this, tag](int exitCode, const QByteArray&, const QByteArray&) {
++        if (exitCode != 0)
++            return;
++        m_installed.installed.removeAll(tag);
++        m_installed.installed = m_instance->installedVersions();
++        for (auto& release : m_releases) {
++            if (release.tag == tag)
++                release.installed = false;
++        }
++        populate();
++        updateButtons();
++        m_status->setText(tr("Removed %1.").arg(tag));
++    });
++}
++
++void HorizonVersionsDialog::useForInstance()
++{
++    const auto tag = selectedTag();
++    if (tag.isEmpty())
++        return;
++    m_chosen = tag;
++    accept();
++}
+diff --git a/launcher/ui/dialogs/HorizonVersionsDialog.h b/launcher/ui/dialogs/HorizonVersionsDialog.h
+new file mode 100644
+index 0000000..06b7bed
+--- /dev/null
++++ b/launcher/ui/dialogs/HorizonVersionsDialog.h
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ *
++ *  This program is distributed in the hope that it will be useful,
++ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
++ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ *  GNU General Public License for more details.
++ *
++ *  You should have received a copy of the GNU General Public License
++ *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
++ */
++
++#pragma once
++
++#include <QDialog>
++#include <QList>
++
++#include <functional>
++
++#include "minecraft/HorizonRelease.h"
++
++class QComboBox;
++class QLabel;
++class QProgressBar;
++class QPushButton;
++class QTableWidget;
++class HorizonInstance;
++
++/*!
++ * Milestone M7: install, update and remove Horizon versions.
++ *
++ * The official launcher already owns that job, so this dialog is a thin front
++ * end to its CLI (`horizon-launcher versions|install|remove|update --check`).
++ * It never downloads anything by itself and never removes a version another
++ * Horizon instance or the official launcher plays.
++ */
++class HorizonVersionsDialog : public QDialog {
++    Q_OBJECT
++
++   public:
++    explicit HorizonVersionsDialog(HorizonInstance* instance, QWidget* parent = nullptr);
++
++    /// The version the user picked with "Use for this instance", if any.
++    QString chosenVersion() const { return m_chosen; }
++
++   private slots:
++    void refresh();
++    void checkForUpdates();
++    void installSelected();
++    void removeSelected();
++    void useForInstance();
++
++   private:
++    void populate();
++    void updateButtons();
++    void setBusy(bool busy, const QString& what);
++    void runCli(const QStringList& args, const QString& what, const std::function<void(int, const QByteArray&, const QByteArray&)>& done);
++    void showFailure(const QString& what, const QByteArray& stderrText);
++    QString selectedTag() const;
++    bool isInUse(const QString& tag) const;
++
++    HorizonInstance* m_instance = nullptr;
++    QTableWidget* m_table = nullptr;
++    QLabel* m_status = nullptr;
++    QProgressBar* m_progress = nullptr;
++    QPushButton* m_refresh = nullptr;
++    QPushButton* m_checkUpdates = nullptr;
++    QPushButton* m_install = nullptr;
++    QPushButton* m_remove = nullptr;
++    QPushButton* m_use = nullptr;
++
++    QList<HorizonRelease> m_releases;
++    HorizonInstalledVersions m_installed;
++    HorizonUpdates m_updates;
++    QString m_chosen;
++    bool m_busy = false;
++};
+diff --git a/launcher/ui/pages/instance/HorizonSettingsPage.cpp b/launcher/ui/pages/instance/HorizonSettingsPage.cpp
+index 10e86ac..6c691d9 100644
+--- a/launcher/ui/pages/instance/HorizonSettingsPage.cpp
++++ b/launcher/ui/pages/instance/HorizonSettingsPage.cpp
+@@ -15,9 +15,11 @@
+ #include <QFormLayout>
+ #include <QGroupBox>
+ #include <QLabel>
++#include <QPushButton>
+ #include <QVBoxLayout>
+ 
+ #include "minecraft/HorizonInstance.h"
++#include "ui/dialogs/HorizonVersionsDialog.h"
+ 
+ HorizonSettingsPage::HorizonSettingsPage(HorizonInstance* instance, QWidget* parent) : QWidget(parent), m_instance(instance)
+ {
+@@ -46,6 +48,11 @@ HorizonSettingsPage::HorizonSettingsPage(HorizonInstance* instance, QWidget* par
+     m_fullscreen = new QCheckBox(tr("Start in fullscreen"), general);
+     form->addRow(QString(), m_fullscreen);
+ 
++    m_manageVersions = new QPushButton(tr("Manage Horizon versions…"), general);
++    m_manageVersions->setToolTip(tr("Install, update or remove Horizon versions, and use one for this instance."));
++    form->addRow(QString(), m_manageVersions);
++    connect(m_manageVersions, &QPushButton::clicked, this, &HorizonSettingsPage::openVersionsDialog);
++
+     m_resources = new QLabel(general);
+     m_resources->setWordWrap(true);
+     m_resources->setTextInteractionFlags(Qt::TextSelectableByMouse);
+@@ -104,3 +111,20 @@ bool HorizonSettingsPage::apply()
+     m_instance->setFullscreen(m_fullscreen->isChecked());
+     return true;
+ }
++
++void HorizonSettingsPage::openVersionsDialog()
++{
++    HorizonVersionsDialog dialog(m_instance, this);
++    if (dialog.exec() != QDialog::Accepted)
++        return;
++
++    const auto chosen = dialog.chosenVersion();
++    if (chosen.isEmpty())
++        return;
++
++    // The page is what apply() saves, so fill the combos instead of writing
++    // horizon.json behind its back.
++    loadSettings();
++    m_clientVersion->setCurrentText(chosen);
++    m_preparerVersion->setCurrentText(chosen);
++}
+diff --git a/launcher/ui/pages/instance/HorizonSettingsPage.h b/launcher/ui/pages/instance/HorizonSettingsPage.h
+index 18de3fc..285f3e4 100644
+--- a/launcher/ui/pages/instance/HorizonSettingsPage.h
++++ b/launcher/ui/pages/instance/HorizonSettingsPage.h
+@@ -18,6 +18,7 @@ class HorizonInstance;
+ class QCheckBox;
+ class QComboBox;
+ class QLabel;
++class QPushButton;
+ 
+ /*!
+  * Milestone M2: Horizon-specific instance settings.
+@@ -42,10 +43,13 @@ class HorizonSettingsPage : public QWidget, public BasePage {
+     void loadSettings();
+ 
+    private:
++    void openVersionsDialog();
++
+     HorizonInstance* m_instance;
+     QComboBox* m_channel = nullptr;
+     QComboBox* m_clientVersion = nullptr;
+     QComboBox* m_preparerVersion = nullptr;
++    QPushButton* m_manageVersions = nullptr;
+     QCheckBox* m_fullscreen = nullptr;
+     QLabel* m_resources = nullptr;
+     QLabel* m_minecraft = nullptr;
+diff --git a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+index d8e513d..70e2dca 100644
+--- a/tests/CMakeLists.txt
++++ b/tests/CMakeLists.txt
+@@ -27,6 +27,7 @@ set(TEST_SOURCES
+     XmlLogs_test.cpp
+     Commandline_test.cpp
+     HorizonMod_test.cpp
++    HorizonRelease_test.cpp
+ )
+ 
+ # NOTE(@getchoo): Very funny way of aliasing the Qt generated `main` test functions to respective filenames
+diff --git a/tests/HorizonRelease_test.cpp b/tests/HorizonRelease_test.cpp
+new file mode 100644
+index 0000000..22f751e
+--- /dev/null
++++ b/tests/HorizonRelease_test.cpp
+@@ -0,0 +1,173 @@
++// SPDX-License-Identifier: GPL-3.0-only
++/*
++ *  horizon-prism - Prism Launcher fork for Project Horizon
++ *  Copyright (C) 2026 horizon-prism contributors
++ *
++ *  This program is free software: you can redistribute it and/or modify
++ *  it under the terms of the GNU General Public License as published by
++ *  the Free Software Foundation, version 3.
++ */
++
++#include <QTest>
++
++#include "minecraft/HorizonRelease.h"
++
++namespace {
++// Trimmed from `horizon-launcher versions --json` on 2026-11-18.
++constexpr auto VERSIONS = R"([
++  {
++    "tag": "nightly-2026-11-18-0b14f8a",
++    "name": "Nightly 2026-11-18 · 0b14f8a",
++    "date": "2026-11-18",
++    "prerelease": false,
++    "available_here": false,
++    "installed": false
++  },
++  {
++    "tag": "nightly-2026-11-13-9f42064",
++    "name": "Nightly 2026-11-13 · 9f42064",
++    "date": "2026-11-13",
++    "prerelease": true,
++    "available_here": true,
++    "installed": true
++  }
++])";
++
++constexpr auto INSTALLED = R"({
++  "installed": [
++    "nightly-2026-11-13-9f42064",
++    "nightly-2026-11-08-fdc87ae"
++  ],
++  "selected": "nightly-2026-11-13-9f42064"
++})";
++
++constexpr auto NO_SELECTION = R"({ "installed": [], "selected": null })";
++
++constexpr auto UPDATE_CHECK = R"({
++  "horizon": null,
++  "launcher": "0.2.78",
++  "launcher_current": "0.2.68"
++})";
++}  // namespace
++
++class HorizonReleaseTest : public QObject {
++    Q_OBJECT
++   private slots:
++    void parsesTheReleaseList()
++    {
++        QString error;
++        const auto releases = HorizonRelease::listFromJson(VERSIONS, &error);
++
++        QVERIFY2(error.isEmpty(), qPrintable(error));
++        QCOMPARE(releases.size(), 2);
++        QCOMPARE(releases.at(0).tag, QStringLiteral("nightly-2026-11-18-0b14f8a"));
++        QCOMPARE(releases.at(0).name, QStringLiteral("Nightly 2026-11-18 · 0b14f8a"));
++        QCOMPARE(releases.at(0).date, QStringLiteral("2026-11-18"));
++    }
++
++    void keepsThePerReleaseFlags()
++    {
++        const auto releases = HorizonRelease::listFromJson(VERSIONS);
++
++        QCOMPARE(releases.size(), 2);
++        QVERIFY(!releases.at(0).availableHere);
++        QVERIFY(!releases.at(0).installed);
++        QVERIFY(releases.at(1).prerelease);
++        QVERIFY(releases.at(1).availableHere);
++        QVERIFY(releases.at(1).installed);
++    }
++
++    void skipsEntriesWithoutATag()
++    {
++        const auto releases = HorizonRelease::listFromJson(R"([{"name": "no tag"}, {"tag": "v0.2.97"}])");
++
++        QCOMPARE(releases.size(), 1);
++        QCOMPARE(releases.at(0).tag, QStringLiteral("v0.2.97"));
++    }
++
++    void acceptsAnEmptyReleaseList()
++    {
++        QString error;
++        QVERIFY(HorizonRelease::listFromJson("[]", &error).isEmpty());
++        QVERIFY2(error.isEmpty(), qPrintable(error));
++    }
++
++    void rejectsAMalformedAnswer()
++    {
++        QString error;
++        QVERIFY(HorizonRelease::listFromJson("{not json", &error).isEmpty());
++        QVERIFY(!error.isEmpty());
++    }
++
++    void rejectsAnObjectWhereAListIsExpected()
++    {
++        QString error;
++        QVERIFY(HorizonRelease::listFromJson(R"({"installed": []})", &error).isEmpty());
++        QVERIFY(error.contains(QStringLiteral("list")));
++    }
++
++    void parsesTheInstalledVersions()
++    {
++        QString error;
++        const auto versions = HorizonInstalledVersions::fromJson(INSTALLED, &error);
++
++        QVERIFY2(error.isEmpty(), qPrintable(error));
++        QCOMPARE(versions.installed.size(), 2);
++        QCOMPARE(versions.installed.at(0), QStringLiteral("nightly-2026-11-13-9f42064"));
++        QCOMPARE(versions.selected, QStringLiteral("nightly-2026-11-13-9f42064"));
++    }
++
++    void treatsANullSelectionAsNone()
++    {
++        const auto versions = HorizonInstalledVersions::fromJson(NO_SELECTION);
++
++        QVERIFY(versions.installed.isEmpty());
++        QVERIFY(versions.selected.isEmpty());
++    }
++
++    void parsesTheUpdateCheck()
++    {
++        QString error;
++        const auto updates = HorizonUpdates::fromJson(UPDATE_CHECK, &error);
++
++        QVERIFY2(error.isEmpty(), qPrintable(error));
++        QVERIFY(!updates.hasHorizonUpdate());
++        QVERIFY(updates.hasLauncherUpdate());
++        QCOMPARE(updates.launcherVersion, QStringLiteral("0.2.78"));
++        QCOMPARE(updates.launcherCurrent, QStringLiteral("0.2.68"));
++    }
++
++    void reportsAHorizonUpdate()
++    {
++        const auto updates = HorizonUpdates::fromJson(
++            R"({"horizon": "v0.3.0", "launcher": null, "launcher_current": "0.2.68"})");
++
++        QVERIFY(updates.hasHorizonUpdate());
++        QCOMPARE(updates.horizonTag, QStringLiteral("v0.3.0"));
++        QVERIFY(!updates.hasLauncherUpdate());
++    }
++
++    void parsesTheInstallResult()
++    {
++        QString error;
++        const auto result = HorizonInstallResult::fromJson(
++            R"({"installed": "nightly-2026-11-18-0b14f8a", "prepared": false})", &error);
++
++        QVERIFY2(error.isEmpty(), qPrintable(error));
++        QCOMPARE(result.installed, QStringLiteral("nightly-2026-11-18-0b14f8a"));
++        QVERIFY(!result.prepared);
++    }
++
++    void rejectsAnInstallResultWithoutAVersion()
++    {
++        QString error;
++        const auto result = HorizonInstallResult::fromJson(R"({"prepared": true})", &error);
++
++        QVERIFY(result.installed.isEmpty());
++        QVERIFY(!error.isEmpty());
++    }
++};
++
++QTEST_GUILESS_MAIN(HorizonReleaseTest)
++
++#include "HorizonRelease_test.moc"
+-- 
+2.50.1 (Apple Git-155)
+

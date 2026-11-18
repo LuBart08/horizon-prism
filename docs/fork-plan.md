@@ -125,7 +125,8 @@ Implémenté sur la branche `horizon/m2` :
   l'option est active.
 
 Écarts assumés : pas de render distance/vsync (absents du contrat
-`--launch-api`), canal informatif tant que M6 ne gère pas les mises à jour.
+`--launch-api`), canal informatif (M7 gère l'installation et les mises à jour
+des versions, pas la signification du canal).
 
 Critère : les réglages persistent dans `horizon.json` et survivent à un
 redémarrage.
@@ -258,6 +259,32 @@ Critère : un produit distribuable.
 
 Détails : [`fork/M6.md`](../fork/M6.md).
 
+### M7 — gestion des versions ✅ (compilé et testé)
+
+Objectif : installer, mettre à jour et supprimer Horizon sans quitter le fork.
+
+Implémenté sur la branche `horizon/m7` :
+
+- `HorizonRelease` : modèle et parsing des sorties JSON de
+  `horizon-launcher versions --json`, `versions --installed --json`,
+  `update --check --json` et `install --json` (14 tests) ;
+- `HorizonInstance::launcherCli()` : `launcherPath` de `horizon.json`, sinon
+  `Horizon.app` (macOS), sinon `PATH` ;
+- boîte « Horizon versions » ouverte depuis la page Horizon : versions
+  installées et disponibles, rafraîchir, installer, supprimer, vérifier les
+  mises à jour, « utiliser pour cette instance » ;
+- garde-fous : rien n'est supprimé si la version est choisie par Horizon ou
+  épinglée par une instance ; aucun accès réseau à l'ouverture ; le launcher
+  lui-même n'est jamais mis à jour par le fork.
+
+Écarts assumés : pas de pourcentage pendant `install` (la CLI ne l'écrit pas
+hors terminal), pas d'annulation, et `remove` se fie au code de sortie faute de
+sortie JSON.
+
+Critère : les versions Horizon se gèrent depuis le fork.
+
+Détails : [`fork/M7.md`](../fork/M7.md).
+
 ## 3. Carte des fichiers Prism à toucher
 
 | Fichier | Rôle dans le fork |
@@ -272,6 +299,8 @@ Détails : [`fork/M6.md`](../fork/M6.md).
 | `launcher/minecraft/auth/AuthSession.h` | mapping session → JSON Horizon |
 | `launcher/modplatform/ModIndex.h` | index de contenu Horizon |
 | `launcher/ui/pages/instance/InstanceSettingsPage.cpp` | onglet Horizon |
+| `launcher/ui/dialogs/HorizonVersionsDialog.{h,cpp}` | gestion des versions Horizon (M7) |
+| `launcher/minecraft/HorizonRelease.{h,cpp}` | parsing des sorties JSON de `horizon-launcher` |
 | `launcher/ui/MainWindow.cpp` | actions « Prepare », « Repair » |
 | `launcher/updater/*` | updater du fork |
 | `launcher/CMakeLists.txt` | nouveaux fichiers |
