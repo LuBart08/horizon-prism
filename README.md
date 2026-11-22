@@ -234,6 +234,9 @@ Le fork Prism est publié sur
 **[github.com/LuBart08/horizon-prism-launcher](https://github.com/LuBart08/horizon-prism-launcher)**
 (branche par défaut `horizon/latest`, qui contient M1 + M3 + M4 + M2 + M5 + M6 + M7).
 Les branches `horizon/m1` à `horizon/m7` gardent chaque jalon séparé.
+La CI GitHub (`.github/workflows/horizon.yml`) construit et teste les trois
+systèmes (macOS universel, Ubuntu, Windows MSVC) à chaque push et publie un
+bundle macOS **Debug non signé** en artefact de workflow.
 
 Le clone complet de Prism (`fork/PrismLauncher/`) n'est **pas** versionné ici :
 il a son propre dépôt GitHub et suit `PrismLauncher/develop`.

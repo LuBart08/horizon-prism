@@ -1,4 +1,4 @@
-From 74888f717c79db4e96ebbeed49cdc7e1d450f988 Mon Sep 17 00:00:00 2001
+From a63fa7ab72e217c596511eb8876afc867fab26e5 Mon Sep 17 00:00:00 2001
 From: horizon-prism <horizon-prism@localhost>
 Date: Wed, 18 Nov 2026 11:06:18 +0100
 Subject: [PATCH] feat: add fork branding (M6)
@@ -22,18 +22,18 @@ Subject: [PATCH] feat: add fork branding (M6)
 
 Co-authored-by: Claude <noreply@anthropic.com>
 ---
- .github/workflows/horizon.yml | 92 +++++++++++++++++++++++++++++++++++
- CMakeLists.txt                | 49 ++++++++++++++++---
- program_info/CMakeLists.txt   | 76 ++++++++++++++++++++---------
- 3 files changed, 187 insertions(+), 30 deletions(-)
+ .github/workflows/horizon.yml | 117 ++++++++++++++++++++++++++++++++++
+ CMakeLists.txt                |  49 ++++++++++++--
+ program_info/CMakeLists.txt   |  76 +++++++++++++++-------
+ 3 files changed, 212 insertions(+), 30 deletions(-)
  create mode 100644 .github/workflows/horizon.yml
 
 diff --git a/.github/workflows/horizon.yml b/.github/workflows/horizon.yml
 new file mode 100644
-index 0000000..f2b0c5d
+index 0000000..d4eaf58
 --- /dev/null
 +++ b/.github/workflows/horizon.yml
-@@ -0,0 +1,92 @@
+@@ -0,0 +1,117 @@
 +name: Horizon fork
 +
 +# Builds the fork with its own branding (HORIZON_FORK=ON) and runs the unit
@@ -64,7 +64,11 @@ index 0000000..f2b0c5d
 +      fail-fast: false
 +      matrix:
 +        include:
-+          - os: macos-26
++          # Intel image on purpose: the arm64 macOS pool (macos-26 and
++          # macos-15 alike) refuses to hand out runners for this repository
++          # ("not acquired after multiple attempts"), while the Intel image
++          # starts at once. The build is universal anyway (x86_64;arm64).
++          - os: macos-15-intel
 +            artifact-name: macOS
 +            qt-version: 6.11.2
 +            macosx-deployment-target: 13.0
@@ -82,6 +86,13 @@ index 0000000..f2b0c5d
 +            cmake-osx-architectures: ''
 +
 +    runs-on: ${{ matrix.os }}
++
++    # Same shell as Prism's workflow: on Windows the default PowerShell does
++    # not expand $CMAKE_PRESET, which silently dropped the preset and left the
++    # vcpkg toolchain unused.
++    defaults:
++      run:
++        shell: bash
 +
 +    env:
 +      ARTIFACT_NAME: ${{ matrix.artifact-name }}-Qt6
@@ -106,7 +117,10 @@ index 0000000..f2b0c5d
 +          qt-version: ${{ matrix.qt-version }}
 +
 +      - name: Configure
-+        run: cmake --preset "$CMAKE_PRESET" -D HORIZON_FORK=ON
++        run: >-
++          cmake --preset "$CMAKE_PRESET" -D HORIZON_FORK=ON
++          -D VCPKG_HOST_TRIPLET="$VCPKG_TRIPLET"
++          -D VCPKG_TARGET_TRIPLET="$VCPKG_TRIPLET"
 +
 +      - name: Build
 +        run: cmake --build --preset "$CMAKE_PRESET" --config "$BUILD_TYPE"
@@ -117,7 +131,18 @@ index 0000000..f2b0c5d
 +      - name: Package (macOS, unsigned)
 +        if: ${{ runner.os == 'macOS' }}
 +        run: |
-+          ditto -c -k --keepParent build/horizon-prism.app HorizonPrismLauncher-macOS-unsigned.zip
++          # Prism deploys Qt (frameworks, plugins, icon, jars) from the install
++          # rules, not from the build tree, so package an installed bundle.
++          cmake --install build --config "$BUILD_TYPE" --prefix install
++          app="install/horizon-prism.app"
++          test -d "$app/Contents/Frameworks/QtCore.framework"
++          test -f "$app/Contents/Resources/HorizonPrismLauncher.icns"
++          plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist" \
++            | grep -qx 'dev.playhorizon.HorizonPrismLauncher'
++          # Ad-hoc signature: still not notarized, but a valid signature keeps
++          # Apple silicon from reporting the bundle as damaged.
++          codesign --force --deep --sign - "$app"
++          ditto -c -k --sequesterRsrc --keepParent "$app" HorizonPrismLauncher-macOS-unsigned.zip
 +
 +      - name: Upload macOS artifact
 +        if: ${{ runner.os == 'macOS' }}

@@ -246,8 +246,9 @@ Implémenté sur la branche `horizon/m6` :
 - `program_info/CMakeLists.txt` : les noms installés changent, les fichiers
   d'art Prism restent les entrées (pas de nouvelle icône) ;
 - `fork/build-m6.sh` : configure + compile + tests avec le branding fork ;
-- `.github/workflows/horizon.yml` : build + tests macOS/Linux/Windows,
-  artefact macOS non signé ;
+- `.github/workflows/horizon.yml` : build + tests macOS/Linux/Windows
+  (les trois jobs passent sur `horizon/latest`), artefact macOS Debug non
+  signé ;
 - licence GPL-3.0 conservée, `HORIZON.md` et l'à-propos mentionnent le fork.
 
 Écarts assumés : pas de clé Sparkle, pas de certificat Apple/Windows, donc
