@@ -1,4 +1,4 @@
-From b96dcbf8b9ed5656361648eaa86516512a113866 Mon Sep 17 00:00:00 2001
+From f553767c5f42ad28e8e2ee6854788f3caa2ad7b9 Mon Sep 17 00:00:00 2001
 From: horizon-prism <horizon-prism@localhost>
 Date: Wed, 18 Nov 2026 11:06:18 +0100
 Subject: [PATCH] feat: add fork branding (M6)
@@ -22,12 +22,28 @@ Subject: [PATCH] feat: add fork branding (M6)
 
 Co-authored-by: Claude <noreply@anthropic.com>
 ---
- .github/workflows/horizon.yml | 128 ++++++++++++++++++++++++++++++++++
- CMakeLists.txt                |  59 +++++++++++++---
- program_info/CMakeLists.txt   |  76 ++++++++++++++------
- 3 files changed, 232 insertions(+), 31 deletions(-)
+ .github/actions/setup-dependencies/action.yml |   4 +
+ .github/workflows/horizon.yml                 | 128 ++++++++++++++++++
+ CMakeLists.txt                                |  59 ++++++--
+ program_info/CMakeLists.txt                   |  76 +++++++----
+ 4 files changed, 236 insertions(+), 31 deletions(-)
  create mode 100644 .github/workflows/horizon.yml
 
+diff --git a/.github/actions/setup-dependencies/action.yml b/.github/actions/setup-dependencies/action.yml
+index aa25259..7762770 100644
+--- a/.github/actions/setup-dependencies/action.yml
++++ b/.github/actions/setup-dependencies/action.yml
+@@ -58,6 +58,10 @@ runs:
+       uses: hendrikmuhs/ccache-action@v1.2.23
+       with:
+         variant: sccache
++        # The action's default ("500MB") is rejected by sccache 0.20.0, which
++        # only takes an integer and a single-letter suffix. "500M" works with
++        # both the old and the new parser.
++        max-size: 500M
+         create-symlink: ${{ runner.os != 'Windows' }}
+         key: ${{ runner.os }}-${{ runner.arch }}-${{ inputs.artifact-name }}-sccache
+ 
 diff --git a/.github/workflows/horizon.yml b/.github/workflows/horizon.yml
 new file mode 100644
 index 0000000..323e4bb
