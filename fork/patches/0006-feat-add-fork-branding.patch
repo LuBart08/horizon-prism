@@ -1,4 +1,4 @@
-From a63fa7ab72e217c596511eb8876afc867fab26e5 Mon Sep 17 00:00:00 2001
+From b96dcbf8b9ed5656361648eaa86516512a113866 Mon Sep 17 00:00:00 2001
 From: horizon-prism <horizon-prism@localhost>
 Date: Wed, 18 Nov 2026 11:06:18 +0100
 Subject: [PATCH] feat: add fork branding (M6)
@@ -22,18 +22,18 @@ Subject: [PATCH] feat: add fork branding (M6)
 
 Co-authored-by: Claude <noreply@anthropic.com>
 ---
- .github/workflows/horizon.yml | 117 ++++++++++++++++++++++++++++++++++
- CMakeLists.txt                |  49 ++++++++++++--
- program_info/CMakeLists.txt   |  76 +++++++++++++++-------
- 3 files changed, 212 insertions(+), 30 deletions(-)
+ .github/workflows/horizon.yml | 128 ++++++++++++++++++++++++++++++++++
+ CMakeLists.txt                |  59 +++++++++++++---
+ program_info/CMakeLists.txt   |  76 ++++++++++++++------
+ 3 files changed, 232 insertions(+), 31 deletions(-)
  create mode 100644 .github/workflows/horizon.yml
 
 diff --git a/.github/workflows/horizon.yml b/.github/workflows/horizon.yml
 new file mode 100644
-index 0000000..d4eaf58
+index 0000000..323e4bb
 --- /dev/null
 +++ b/.github/workflows/horizon.yml
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,128 @@
 +name: Horizon fork
 +
 +# Builds the fork with its own branding (HORIZON_FORK=ON) and runs the unit
@@ -64,11 +64,11 @@ index 0000000..d4eaf58
 +      fail-fast: false
 +      matrix:
 +        include:
-+          # Intel image on purpose: the arm64 macOS pool (macos-26 and
-+          # macos-15 alike) refuses to hand out runners for this repository
-+          # ("not acquired after multiple attempts"), while the Intel image
-+          # starts at once. The build is universal anyway (x86_64;arm64).
-+          - os: macos-15-intel
++          # macos-26 is the image whose vcpkg binary cache (GitHub Packages)
++          # already holds the universal dependencies, so it reuses compiled
++          # packages instead of rebuilding them. Its arm64 pool is sometimes
++          # starved; rerun the macOS job if it is cancelled while queued.
++          - os: macos-26
 +            artifact-name: macOS
 +            qt-version: 6.11.2
 +            macosx-deployment-target: 13.0
@@ -140,9 +140,20 @@ index 0000000..d4eaf58
 +          plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist" \
 +            | grep -qx 'dev.playhorizon.HorizonPrismLauncher'
 +          # Ad-hoc signature: still not notarized, but a valid signature keeps
-+          # Apple silicon from reporting the bundle as damaged.
++          # Apple silicon from reporting the bundle as damaged. Prism keeps its
++          # launcher jars under Contents/MacOS, which codesign treats as nested
++          # code, so the jars are signed before the bundle; otherwise the seal
++          # never validates.
++          codesign --force --sign - "$app/Contents/MacOS/jars/"*.jar
 +          codesign --force --deep --sign - "$app"
++          codesign --verify --deep --strict "$app"
 +          ditto -c -k --sequesterRsrc --keepParent "$app" HorizonPrismLauncher-macOS-unsigned.zip
++
++          # The jar signatures live in extended attributes, so check that the
++          # archive keeps them: this is what a user's extraction produces.
++          rm -rf verify && mkdir verify
++          ditto -x -k HorizonPrismLauncher-macOS-unsigned.zip verify
++          codesign --verify --deep --strict verify/horizon-prism.app
 +
 +      - name: Upload macOS artifact
 +        if: ${{ runner.os == 'macOS' }}
@@ -152,7 +163,7 @@ index 0000000..d4eaf58
 +          path: HorizonPrismLauncher-macOS-unsigned.zip
 +          if-no-files-found: error
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 6a82bc6..ef6257a 100644
+index 6a82bc6..286d5b3 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -173,6 +173,10 @@ set(CMAKE_MODULE_PATH "${ECM_MODULE_PATH};${CMAKE_MODULE_PATH}")
@@ -237,7 +248,29 @@ index 6a82bc6..ef6257a 100644
      set(MACOSX_SPARKLE_DOWNLOAD_URL "https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-2.9.6.tar.xz" CACHE STRING "URL to Sparkle release archive")
      set(MACOSX_SPARKLE_SHA256 "52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192" CACHE STRING "SHA256 checksum for Sparkle release archive")
      set(MACOSX_SPARKLE_DIR "${CMAKE_BINARY_DIR}/frameworks/Sparkle")
-@@ -489,7 +524,7 @@ elseif(UNIX)
+@@ -451,12 +486,20 @@ if(UNIX AND APPLE)
+             set(GENERATED_ASSETS_CAR "${ASSETS_OUT_DIR}/Assets.car")
+             set(ICON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${Launcher_Branding_MAC_ICON}")
+ 
++            # The .icon document is Prism's, so the icon set inside it keeps
++            # Prism's name even when the fork renames the app and the .icns.
++            if(HORIZON_FORK)
++                set(ASSETS_ICON_NAME "PrismLauncher")
++            else()
++                set(ASSETS_ICON_NAME "${Launcher_Name}")
++            endif()
++
+             add_custom_command(
+                 OUTPUT "${GENERATED_ASSETS_CAR}"
+                 COMMAND ${ACTOOL_EXE} "${ICON_SOURCE}"
+                         --compile "${ASSETS_OUT_DIR}"
+                         --output-partial-info-plist /dev/null
+-                        --app-icon ${Launcher_Name}
++                        --app-icon ${ASSETS_ICON_NAME}
+                         --enable-on-demand-resources NO
+                         --target-device mac
+                         --minimum-deployment-target ${CMAKE_OSX_DEPLOYMENT_TARGET}
+@@ -489,7 +532,7 @@ elseif(UNIX)
  
      install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${Launcher_Desktop} DESTINATION ${KDE_INSTALL_APPDIR})
      install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${Launcher_MetaInfo} DESTINATION ${KDE_INSTALL_METAINFODIR})
